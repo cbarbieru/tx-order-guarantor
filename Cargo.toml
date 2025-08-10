@@ -1,0 +1,33 @@
+[package]
+name = "tx-order-guarantor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread"] }
+async-trait = "0.1.83"
+serde_json = {version = "1.0.141"}
+anyhow = "1.0"
+
+thiserror = { version = "1.0.64" }
+eyre = { version = "0.6.12" }
+
+# JSON-RPC server framework
+jsonrpsee = { version = "0.25.1", features = ["server", "macros"] }
+jsonrpsee-types = { version = "0.25.1" }
+jsonrpsee-core = { version = "0.25.1" }
+
+# Alloy Ethereum types (ERC-4337)
+alloy-primitives = "1.0.23"
+alloy-rpc-types-eth = "1.0.23"
+alloy-genesis = { version = "1.0.23" }
+
+# Reth ecosystem
+reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
+reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
+reth-storage-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
+reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
+reth-optimism-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
+reth-optimism-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0", features = ["serde"] }
+reth-optimism-txpool = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
+reth-optimism-rpc = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
