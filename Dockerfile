@@ -2,27 +2,24 @@
 FROM rust:1.88 as builder
 
 RUN apt-get update && apt-get install -y clang libclang-dev pkg-config build-essential
+RUN apt-get update && apt-get install -y musl-tools
+RUN rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /usr/src/app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo fetch
-RUN cargo build --release
+# RUN cargo fetch
+RUN cargo build --release --target x86_64-unknown-linux-musl
 
 # Runtime stage
-FROM debian:buster-slim
+FROM scratch
 # RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/local/bin
 
 # Copy binary
-COPY --from=builder /usr/src/app/target/release/tx-order-guarantor .
+COPY --from=builder /usr/src/app/target/x86_64-unknown-linux-musl/release/tx-order-guarantor .
 
-# Copy the `res` folder **two levels up** relative to WORKDIR
-COPY res /usr/res
-
-# Set working directory to where the binary expects to be run from
-# so that "../../res/l2-genesis.json" resolves to /usr/res/l2-genesis.json
-WORKDIR /usr/local/bin
+COPY res /usr/local/bin/res
 
 CMD ["./tx-order-guarantor"]

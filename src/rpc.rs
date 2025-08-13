@@ -1,29 +1,25 @@
 //! Eth API extension.
 
 use alloy_primitives::{Bytes, B256};
-use alloy_rpc_types_eth::erc4337::{TransactionConditional};
 use jsonrpsee_core::RpcResult;
 use reth_optimism_txpool::conditional::MaybeConditionalTransaction;
-use reth_rpc_eth_api::L2EthApiExtServer;
 use reth_rpc_eth_types::EthApiError;
 use reth_rpc_eth_types::utils::recover_raw_transaction;
 use reth_transaction_pool::{PoolTransaction, TransactionOrigin, TransactionPool};
-use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
-pub struct GuarantorApi<Pool, Provider> {
-    inner: Arc<OpEthExtApiInner<Pool, Provider>>,
+pub struct GuarantorApi<Pool> {
+    inner: Arc<OpEthExtApiInner<Pool>>,
 }
 
-impl<Pool, Provider> GuarantorApi<Pool, Provider>
+impl<Pool> GuarantorApi<Pool>
 where
-    Provider: BlockReaderIdExt + StateProviderFactory + Clone + 'static,
     Pool: TransactionPool<Transaction: MaybeConditionalTransaction> + 'static,
 {
     /// Creates a new [`OpEthExtApi`].
-    pub fn new(pool: Pool, provider: Provider) -> Self {
-        let inner = Arc::new(OpEthExtApiInner::new(pool, provider));
+    pub fn new(pool: Pool) -> Self {
+        let inner = Arc::new(OpEthExtApiInner::new(pool));
         Self { inner }
     }
 
@@ -35,24 +31,20 @@ where
     fn pool(&self) -> &Pool {
         self.inner.pool()
     }
-
-    #[inline]
-    fn provider(&self) -> &Provider {
-        self.inner.provider()
-    }
 }
 
 #[async_trait::async_trait]
-impl<Pool, Provider> L2EthApiExtServer for GuarantorApi<Pool, Provider>
+pub trait GuarantorTxGet {
+    async fn send_raw_transaction(&self, bytes: Bytes) -> RpcResult<B256>;
+    async fn get_best_transaction_hashes(&self) -> RpcResult<Vec<B256>>;
+}
+
+#[async_trait::async_trait]
+impl<Pool> GuarantorTxGet for GuarantorApi<Pool>
 where
-    Provider: BlockReaderIdExt + StateProviderFactory + Clone + 'static,
     Pool: TransactionPool<Transaction: MaybeConditionalTransaction> + 'static,
 {
-    async fn send_raw_transaction_conditional(
-        &self,
-        bytes: Bytes,
-        condition: TransactionConditional,
-    ) -> RpcResult<B256> {
+    async fn send_raw_transaction(&self, bytes: Bytes) -> RpcResult<B256> {
 
         let recovered_tx = recover_raw_transaction(&bytes).map_err(|_| {
             OpEthApiError::Eth(EthApiError::FailedToDecodeSignedTransaction)
@@ -67,19 +59,7 @@ where
 
         Ok(hash)
     }
-}
 
-#[async_trait::async_trait]
-pub trait GuarantorTxGet {
-    async fn get_best_transaction_hashes(&self) -> RpcResult<Vec<B256>>;
-}
-
-#[async_trait::async_trait]
-impl<Pool, Provider> GuarantorTxGet for GuarantorApi<Pool, Provider>
-where
-    Provider: BlockReaderIdExt + StateProviderFactory + Clone + 'static,
-    Pool: TransactionPool<Transaction: MaybeConditionalTransaction> + 'static,
-{
     async fn get_best_transaction_hashes(&self) -> RpcResult<Vec<B256>> {
         let best_txs = self.best_transactions();
         let hashes = best_txs.into_iter().map(|tx| tx.hash().clone()).collect();
@@ -88,20 +68,18 @@ where
 }
 
 #[derive(Debug)]
-pub struct OpEthExtApiInner<Pool, Provider> {
+pub struct OpEthExtApiInner<Pool> {
     /// The transaction pool of the node.
     pool: Pool,
-    provider: Provider,
 }
 
-impl<Pool, Provider> OpEthExtApiInner<Pool, Provider>
+impl<Pool> OpEthExtApiInner<Pool>
 where 
     Pool: TransactionPool<Transaction: MaybeConditionalTransaction> + 'static
 {
-    pub fn new(pool: Pool, provider: Provider) -> Self {
+    pub fn new(pool: Pool) -> Self {
         Self {
             pool,
-            provider
         }
     }
 
@@ -114,11 +92,6 @@ where
     #[inline]
     const fn pool(&self) -> &Pool {
         &self.pool
-    }
-
-    #[inline]
-    const fn provider(&self) -> &Provider {
-        &self.provider
     }
 }
 

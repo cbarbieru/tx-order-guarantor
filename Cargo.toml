@@ -19,15 +19,14 @@ jsonrpsee-core = { version = "0.25.1" }
 
 # Alloy Ethereum types (ERC-4337)
 alloy-primitives = "1.0.23"
-alloy-rpc-types-eth = "1.0.23"
 alloy-genesis = { version = "1.0.23" }
 
 # Reth ecosystem
 reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
 reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-storage-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
+reth-storage-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0", default-features = false }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
 reth-optimism-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-optimism-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0", features = ["serde"] }
+reth-optimism-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
 reth-optimism-txpool = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
 reth-optimism-rpc = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
