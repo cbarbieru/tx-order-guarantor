@@ -67,6 +67,12 @@ async fn main() -> anyhow::Result<()> {
             api.send_raw_transaction(bytes).await
         })?;
     
+    let mut mod_txs_raw = RpcModule::new(api.clone());
+    mod_txs_raw
+        .register_async_method("tog_getRawTransactions", |_, api, _| async move {
+            api.get_raw_transactions().await
+        })?;
+
     let mut mod_tx_get = RpcModule::new(api.clone());
     mod_tx_get
         .register_async_method("tog_getBestTransactionHashes", |_, api, _| async move {
@@ -75,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut module = RpcModule::new(api.clone());
     module.merge(mod_tx_send)?;
+    module.merge(mod_txs_raw)?;
     module.merge(mod_tx_get)?;
 
     // Start JSON-RPC server

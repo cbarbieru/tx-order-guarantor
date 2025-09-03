@@ -1,6 +1,7 @@
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use alloy_consensus::Transaction;
-use alloy_primitives::{Bytes, B256};
+use alloy_primitives::{Bytes, B256, hex};
 use jsonrpsee_core::RpcResult;
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_primitives::OpPrimitives;
@@ -14,6 +15,7 @@ use crate::NoopProviderTog;
 pub struct GuarantorApi<Pool, Provider = NoopProviderTog<OpChainSpec, OpPrimitives>> {
     inner: Arc<OpEthExtApiInner<Pool>>,
     provider: Provider,
+    transactions: Arc<Mutex<Vec<Bytes>>>
 }
 
 impl<Pool> GuarantorApi<Pool>
@@ -23,7 +25,7 @@ where
     /// Creates a new [`OpEthExtApi`].
     pub fn new(pool: Pool, provider: NoopProviderTog<OpChainSpec, OpPrimitives>) -> Self {
         let inner = Arc::new(OpEthExtApiInner::new(pool));
-        Self { inner, provider }
+        Self { inner, provider, transactions: Arc::new(Mutex::new(Vec::new()))}
     }
 
     pub fn best_transactions(&self) -> Vec<Pool::Transaction> {
@@ -40,6 +42,7 @@ where
 #[async_trait::async_trait]
 pub trait GuarantorTxGet {
     async fn send_raw_transaction(&self, bytes: Bytes) -> RpcResult<B256>;
+    async fn get_raw_transactions(&self) -> RpcResult<Vec<String>>;
     async fn get_best_transaction_hashes(&self) -> RpcResult<Vec<B256>>;
 }
 
@@ -49,6 +52,9 @@ where
     Pool: TransactionPool<Transaction: MaybeConditionalTransaction> + 'static,
 {
     async fn send_raw_transaction(&self, bytes: Bytes) -> RpcResult<B256> {
+        let mut txs = self.transactions.lock().await;
+        txs.push(bytes.clone());
+        drop(txs);
 
         let recovered_tx = recover_raw_transaction(&bytes).map_err(|_| {
             OpEthApiError::Eth(EthApiError::FailedToDecodeSignedTransaction)
@@ -69,9 +75,23 @@ where
         Ok(hash)
     }
 
+    async fn get_raw_transactions(&self) -> RpcResult<Vec<String>> {
+        let mut txs = self.transactions.lock().await;
+        let raw_hex: Vec<String> = txs
+            .iter()
+            .map(|bytes| format!("0x{}", hex::encode(bytes)))
+            .collect();
+        txs.clear();
+        drop(txs);
+
+        println!("raw_tx_count = {}", raw_hex.len());
+        Ok(raw_hex)
+    }
+
     async fn get_best_transaction_hashes(&self) -> RpcResult<Vec<B256>> {
         let best_txs = self.best_transactions();
         let hashes = best_txs.into_iter().map(|tx| tx.hash().clone()).collect();
+        println!("ordered_hashes = {:?}", &hashes);
         Ok(hashes)
     }
 }
