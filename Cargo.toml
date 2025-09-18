@@ -13,7 +13,7 @@ thiserror = { version = "1.0.64" }
 eyre = { version = "0.6.12" }
 
 # JSON-RPC server framework
-jsonrpsee = { version = "0.25.1", features = ["server", "macros"] }
+jsonrpsee = { version = "0.25.1", features = ["client", "server", "macros"] }
 jsonrpsee-types = { version = "0.25.1" }
 jsonrpsee-core = { version = "0.25.1" }
 

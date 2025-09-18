@@ -3,7 +3,10 @@ mod noop;
 
 use std::{fs, net::SocketAddr, sync::Arc};
 use alloy_primitives::{Bytes, hex};
-use jsonrpsee::server::{ServerBuilder};
+use anyhow::Ok;
+use jsonrpsee::server::ServerBuilder;
+use jsonrpsee::http_client::HttpClientBuilder;
+use jsonrpsee::core::client::{ClientT, Error};
 use jsonrpsee::RpcModule;
 use jsonrpsee_types::ErrorObjectOwned;
 use reth_optimism_chainspec::OpChainSpec;
@@ -15,6 +18,7 @@ use reth_transaction_pool::{
     blobstore::NoopBlobStore, CoinbaseTipOrdering, PoolConfig, TransactionValidationTaskExecutor,
 };
 use alloy_genesis::Genesis;
+use tokio::fs::read;
 
 use crate::noop::NoopProviderTog;
 use crate::rpc::GuarantorTxGet;
@@ -50,7 +54,9 @@ async fn main() -> anyhow::Result<()> {
     let pool: OpTransactionPool<_, _, _> =
         OpTransactionPool::new(op_tx_validator, ordering, blob_store.clone(), config);
     
-    let api = Arc::new(GuarantorApi::new(pool, provider));
+    let builder_client = HttpClientBuilder::default().build("http://localhost:8545").unwrap();
+
+    let api = Arc::new(GuarantorApi::new(pool, provider, builder_client));
     // TODO: generate key pair and 1) expose pk for verification 2) change 'tog_getBestTransactionHashes' to return signed has order 
 
     let mut mod_tx_send = RpcModule::new(api.clone());
