@@ -3,6 +3,7 @@ use tokio::sync::Mutex;
 use alloy_consensus::Transaction;
 use alloy_primitives::{Bytes, B256, hex};
 use jsonrpsee_core::RpcResult;
+use jsonrpsee::http_client::HttpClient;
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_txpool::conditional::MaybeConditionalTransaction;
@@ -15,17 +16,19 @@ use crate::NoopProviderTog;
 pub struct GuarantorApi<Pool, Provider = NoopProviderTog<OpChainSpec, OpPrimitives>> {
     inner: Arc<OpEthExtApiInner<Pool>>,
     provider: Provider,
-    transactions: Arc<Mutex<Vec<Bytes>>>
+    transactions: Arc<Mutex<Vec<Bytes>>>,
+    builder_client: Arc<HttpClient>,
 }
 
 impl<Pool> GuarantorApi<Pool>
 where
     Pool: TransactionPool<Transaction: MaybeConditionalTransaction> + 'static,
 {
-    /// Creates a new [`OpEthExtApi`].
-    pub fn new(pool: Pool, provider: NoopProviderTog<OpChainSpec, OpPrimitives>) -> Self {
+    pub fn new(pool: Pool, provider: NoopProviderTog<OpChainSpec, OpPrimitives>, builder_client: HttpClient) -> Self {
         let inner = Arc::new(OpEthExtApiInner::new(pool));
-        Self { inner, provider, transactions: Arc::new(Mutex::new(Vec::new()))}
+        let transactions = Arc::new(Mutex::new(Vec::new()));
+        let builder_client = Arc::new(builder_client);
+        Self { inner, provider, transactions, builder_client }
     }
 
     pub fn best_transactions(&self) -> Vec<Pool::Transaction> {
@@ -37,6 +40,9 @@ where
         self.inner.pool()
     }
 
+    pub fn builder_client(&self) -> Arc<HttpClient> {
+        Arc::clone(&self.builder_client)
+    }
 }
 
 #[async_trait::async_trait]
@@ -65,6 +71,7 @@ where
 
         let nonce = tx.clone().nonce();
         self.provider.set_nonce_updater(move || { nonce });
+        println!("nonce = {:?}", nonce);
         
         let hash =
             self.pool().add_transaction(TransactionOrigin::Private, tx).await.map_err(|e| {
