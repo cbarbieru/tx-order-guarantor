@@ -19,6 +19,7 @@ use reth_transaction_pool::{
 };
 use alloy_genesis::Genesis;
 use serde_json::Value;
+use std::env;
 
 use crate::noop::NoopProviderTog;
 use crate::rpc::GuarantorTxGet;
@@ -53,7 +54,11 @@ async fn main() -> anyhow::Result<()> {
     let pool: OpTransactionPool<_, _, _> =
         OpTransactionPool::new(op_tx_validator, ordering, blob_store.clone(), config);
     
-    let builder_client = HttpClientBuilder::default().build("http://localhost:2222").unwrap();
+    let host = env::var("BUILDER_HOST").unwrap_or_else(|_| "op-rbuilder".to_string());
+    let port = env::var("BUILDER_PORT").unwrap_or_else(|_| "8545".to_string());
+    let url = format!("http://{}:{}", host, port);
+    println!("builder url = {}", url);
+    let builder_client = HttpClientBuilder::default().build(url).unwrap();
 
     let api = Arc::new(GuarantorApi::new(pool, provider, builder_client));
     // TODO: generate key pair and 1) expose pk for verification 2) change 'tog_getBestTransactionHashes' to return signed has order 
@@ -95,6 +100,9 @@ async fn main() -> anyhow::Result<()> {
         "eth_getBalance",
         "eth_gasPrice",
         "eth_blobBaseFee",
+        "eth_getAccountInfo",
+        "eth_getCode",
+        "eth_getBlockReceipts"
     ];
     let mut passthrough_module = RpcModule::new(api.clone());
     for &method_name in &methods {
