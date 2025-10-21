@@ -9,4 +9,15 @@ curl -X POST -H "Content-Type: application/json" --data '{"method":"eth_sendRawT
 
 curl -H "Content-Type: application/json" --data '{"method":"tog_getBestTransactionHashes","params":[],"id":4,"jsonrpc":"2.0"}' http://127.0.0.1:1545
 
+cast send 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
+  --value 0.01ether \
+  --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+  --rpc-url http://localhost:1545
+
+cast tx 0xd91aca3a8ff1cab0673ce53d6938e977ba2832a7d9a2d60c56ecc5b1e767e5df --rpc-url http://localhost:8547
+
+cast block 65  --rpc-url http://localhost:8547
+
+$ docker run -p 80:80 -e APP_NODE_URL="http://localhost:8545" alethio/ethereum-lite-explorer
+
 ```

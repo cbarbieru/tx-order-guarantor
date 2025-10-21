@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use tokio::sync::Mutex;
 use alloy_consensus::Transaction;
-use alloy_primitives::{Bytes, B256, hex};
+use alloy_primitives::{Bytes, B256, hex, FixedBytes};
 use jsonrpsee_core::RpcResult;
 use jsonrpsee::http_client::HttpClient;
 use reth_optimism_chainspec::OpChainSpec;
@@ -17,6 +17,7 @@ pub struct GuarantorApi<Pool, Provider = NoopProviderTog<OpChainSpec, OpPrimitiv
     inner: Arc<OpEthExtApiInner<Pool>>,
     provider: Provider,
     transactions: Arc<Mutex<Vec<Bytes>>>,
+    counter: Arc<AtomicUsize>,
     builder_client: Arc<HttpClient>,
 }
 
@@ -27,8 +28,9 @@ where
     pub fn new(pool: Pool, provider: NoopProviderTog<OpChainSpec, OpPrimitives>, builder_client: HttpClient) -> Self {
         let inner = Arc::new(OpEthExtApiInner::new(pool));
         let transactions = Arc::new(Mutex::new(Vec::new()));
+        let counter = Arc::new(AtomicUsize::new(0));
         let builder_client = Arc::new(builder_client);
-        Self { inner, provider, transactions, builder_client }
+        Self { inner, provider, transactions, counter, builder_client }
     }
 
     pub fn best_transactions(&self) -> Vec<Pool::Transaction> {
@@ -90,14 +92,19 @@ where
             .collect();
         txs.clear();
         drop(txs);
-
+        self.counter.fetch_add(1, Ordering::SeqCst);
         println!("raw_tx_count = {}", raw_hex.len());
         Ok(raw_hex)
     }
 
     async fn get_best_transaction_hashes(&self) -> RpcResult<Vec<B256>> {
         let best_txs = self.best_transactions();
-        let hashes = best_txs.into_iter().map(|tx| tx.hash().clone()).collect();
+        let hashes: Vec<FixedBytes<32>> = best_txs.into_iter().map(|tx| tx.hash().clone()).collect();
+        let value = self.counter.load(Ordering::SeqCst);
+        if value % 7 == 6 {
+            self.pool().remove_transactions(hashes.clone());
+            println!("cleared pool");
+        }
         println!("ordered_hashes = {:?}", &hashes);
         Ok(hashes)
     }
