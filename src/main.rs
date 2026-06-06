@@ -15,7 +15,8 @@ use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_txpool::{OpPooledTransaction, OpTransactionPool, OpTransactionValidator};
 use reth_tasks::TokioTaskExecutor;
 use reth_transaction_pool::{
-    blobstore::NoopBlobStore, CoinbaseTipOrdering, PoolConfig, TransactionValidationTaskExecutor,
+    blobstore::NoopBlobStore, CoinbaseTipOrdering, PoolConfig, SubPoolLimit,
+    TransactionValidationTaskExecutor,
 };
 use alloy_genesis::Genesis;
 use serde_json::Value;
@@ -49,7 +50,13 @@ async fn main() -> anyhow::Result<()> {
     
     let ordering = CoinbaseTipOrdering::<OpPooledTransaction>::default();
     
-    let config = PoolConfig::default();
+    let sub_pool_limit = SubPoolLimit { max_txs: 100_000, max_size: 512 * 1024 * 1024 };
+    let config = PoolConfig {
+        pending_limit: sub_pool_limit,
+        queued_limit: sub_pool_limit,
+        basefee_limit: sub_pool_limit,
+        ..PoolConfig::default()
+    };
 
     let pool: OpTransactionPool<_, _, _> =
         OpTransactionPool::new(op_tx_validator, ordering, blob_store.clone(), config);
@@ -134,7 +141,12 @@ async fn main() -> anyhow::Result<()> {
     // Start JSON-RPC server
     let addr: SocketAddr = "0.0.0.0:1545".parse()?;
     // let rpc_middleware = jsonrpsee::server::middleware::rpc::RpcServiceBuilder::new().layer_fn(LoggingMiddleware);
-    let server = ServerBuilder::default().build(addr).await?;
+    let server_config = jsonrpsee::server::ServerConfig::builder()
+        .max_connections(1_000)
+        .max_request_body_size(10 * 1024 * 1024)
+        .max_response_body_size(10 * 1024 * 1024)
+        .build();
+    let server = ServerBuilder::with_config(server_config).build(addr).await?;
     let handle = server.start(module);
     println!("🚀 JSON-RPC server listening on http://{}", addr);
     handle.stopped().await;
