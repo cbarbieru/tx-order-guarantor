@@ -3,6 +3,26 @@ name = "tx-order-guarantor"
 version = "0.1.0"
 edition = "2024"
 
+# ── SGX refactor workspace ──────────────────────────────────────────────────
+# The root package (tx-order-guarantor) is the LEGACY monolith and still builds
+# and runs exactly as before — nothing here breaks it. The new trusted/untrusted
+# split lives under `crates/`. See docs/sgx-refactor.md for the full picture.
+#
+#   crates/tog-proto    wire protocol shared by enclave <-> clients (pure, no C)
+#   crates/tog-core     the TCB: pure-Rust mempool + tip ordering (unit-tested)
+#   crates/tog-enclave  the SGX enclave binary (RA-TLS listener on SGX target;
+#                       plaintext dev server on a normal host target)
+#   crates/tog-host     the untrusted passthrough eth_* proxy to the builder
+[workspace]
+resolver = "2"
+members = [
+    "crates/tog-proto",
+    "crates/tog-core",
+    "crates/tog-enclave",
+    "crates/tog-host",
+    "crates/tog-client",
+]
+
 [dependencies]
 tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread"] }
 async-trait = "0.1.83"

@@ -1,0 +1,25 @@
+[package]
+name = "tog-core"
+version = "0.1.0"
+edition = "2024"
+
+# The trusted computing base. Everything here MUST compile for
+# x86_64-fortanix-unknown-sgx, which means: pure Rust only, NO crate that
+# pulls in C/C++ via the `cc` crate (c-kzg, the secp256k1 C lib, mdbx,
+# snappy/zstd, ...). That is exactly why we cannot drag reth-optimism-txpool
+# in here and instead reimplement the minimal tip ordering ourselves.
+#
+# alloy is pure Rust and recovers signers via the RustCrypto `k256` backend
+# (the `k256` feature below) rather than the C secp256k1 library — keep it that
+# way. If a future edit flips alloy onto the `secp256k1` feature, the SGX build
+# will break.
+[dependencies]
+alloy-primitives = { version = "1.0.23", default-features = false, features = ["k256"] }
+alloy-consensus = { version = "1.0.23", default-features = false, features = ["k256"] }
+alloy-eips = { version = "1.0.23", default-features = false }
+thiserror = "1"
+
+[dev-dependencies]
+# Used only to synthesize signed transactions in unit tests (host target).
+alloy-signer = "1.0.23"
+alloy-signer-local = "1.0.23"
