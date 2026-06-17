@@ -1,49 +1,56 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in this repository. See [README.md](README.md)
+for the full architecture, SGX-host setup, and RA-TLS details.
+
+## What this is
+
+A **transaction order guarantor (TOG)** for Optimism/L2, refactored so the
+mempool **ordering runs inside an Intel SGX enclave** (Fortanix EDP) as the
+smallest trusted unit. Clients submit raw txs over **RA-TLS terminating inside
+the enclave**; the builder reads back the raw txs and the enclave-computed
+ordering. Everything else (passthrough `eth_*` → builder) stays outside.
+
+This is a **Cargo virtual workspace** — there is no root package. The earlier
+monolithic `tx-order-guarantor` crate (reth `OpTransactionPool` + jsonrpsee in
+one binary) has been removed; do not reintroduce reth into the enclave path (its
+C deps — c-kzg, secp256k1-C, mdbx — won't compile for `x86_64-fortanix-unknown-sgx`).
+
+## Crates
+
+- **crates/tog-proto** — length-prefixed JSON wire protocol (3 ops). Pure, no C.
+- **crates/tog-core** — the TCB: decode + signer recovery (pure-Rust `k256`) +
+  gap-aware, replace-by-fee, tip-priority ordering. Unit-tested. No state access.
+- **crates/tog-enclave** — SGX binary. No Tokio (blocking `std::net` +
+  thread-per-conn). `src/transport.rs` holds the RA-TLS/Enclave-Manager wiring
+  under `cfg(target_env = "sgx")`; the host build is a plaintext dev server.
+- **crates/tog-host** — untrusted `eth_*` passthrough proxy (tokio + jsonrpsee).
+- **crates/tog-client** — test/reference client; RA-TLS verifier behind the
+  `ratls` feature.
 
 ## Commands
 
 ```bash
-cargo build                    # Debug build
-cargo build --release          # Optimized release build
-cargo run                      # Run the server locally
-cargo test                     # Run tests
-cargo clippy                   # Lint
-cargo fmt                      # Format code
+cargo test -p tog-proto -p tog-core     # the logic that matters (verifiable on any host)
+cargo build                             # whole workspace (host targets)
+cargo run  -p tog-enclave               # PLAINTEXT dev server on :1546 (not attested)
+cargo run  -p tog-host                  # passthrough proxy on :1545
+cargo run  -p tog-client -- --addr 127.0.0.1:1546 demo   # end-to-end smoke test
+cargo clippy && cargo fmt
 
-# Cross-compile for Docker (Linux musl)
-cargo build --release --target x86_64-unknown-linux-musl
+# Enclave build (Linux SGX host, NIGHTLY — see README "Build-host setup"):
+rustup target add x86_64-fortanix-unknown-sgx --toolchain nightly
+cargo +nightly build --release -p tog-enclave --target x86_64-fortanix-unknown-sgx
 ```
 
-The server listens on `0.0.0.0:1545` by default. Builder connection is controlled via env vars:
-- `BUILDER_HOST` (default: `"op-rbuilder"`)
-- `BUILDER_PORT` (default: `"8545"`)
+## Constraints to remember
 
-## Architecture
-
-This is a **transaction order guarantor (TOG)** — a JSON-RPC proxy that sits between transaction submitters and a builder node for Optimism/L2. It accepts raw transactions, maintains an ordered pool, and exposes custom RPC methods for the builder to retrieve ordered batches.
-
-### Source files
-
-- **[src/main.rs](src/main.rs)** — Loads L2 genesis from `res/l2-genesis.json`, builds the Reth `OpTransactionPool`, starts the `jsonrpsee` HTTP server, and composes RPC modules.
-- **[src/rpc.rs](src/rpc.rs)** — `GuarantorApi` with the core RPC surface. Custom endpoints: `tog_getRawTransactions` and `tog_getBestTransactionHashes`. Passthrough eth_* methods forward to the builder via HTTP client.
-- **[src/noop.rs](src/noop.rs)** — `NoopProviderTog`: a mock Reth storage/state provider that returns empty defaults. Contains a nonce callback mechanism so the pool can resolve account nonces without a real chain backend.
-
-### Transaction flow
-
-1. Client submits raw tx via `eth_sendRawTransaction`.
-2. TOG decodes, validates signature, and adds to `OpTransactionPool` (ordered by `CoinbaseTipOrdering`).
-3. Raw bytes are also stored in a side buffer.
-4. Builder calls `tog_getBestTransactionHashes` → returns hash-ordered list; pool clears every 7 calls.
-5. Builder calls `tog_getRawTransactions` → returns serialized bytes; buffer clears on read.
-
-### Key configuration
-
-- Pool limits: 100,000 txs / 512 MB per sub-pool (pending, queued, basefee).
-- Server limits: 10 MB max request/response, 1,000 max concurrent connections.
-- No blob store persistence (`NoopBlobStore`).
-
-### Dependencies
-
-Uses the **Reth v1.6.0** ecosystem (`reth-optimism-txpool`, `reth-optimism-chainspec`, `reth-optimism-rpc`) and **Alloy** for Ethereum types. JSON-RPC layer is `jsonrpsee`; async runtime is Tokio.
+- **Apple-Silicon Macs cannot build for SGX or run enclaves** (no HW, no
+  simulator). The plaintext dev path + `tog-core` tests work there; the SGX path
+  is `cfg`-gated so host builds stay green.
+- **Fortanix EDP requires Rust nightly.**
+- Enclave env vars: `TOG_ENCLAVE_BIND` (default `0.0.0.0:1546`), `TOG_BASE_FEE`;
+  RA-TLS path also `NODE_AGENT_URL` + `TOG_TLS_CN`. Host: `BUILDER_HOST`,
+  `BUILDER_PORT`, `TOG_HOST_BIND`.
+- The enclave holds no chain state and an ephemeral pool (lost on restart;
+  in-enclave time is untrusted).

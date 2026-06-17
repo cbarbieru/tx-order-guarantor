@@ -1,8 +1,8 @@
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
-use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_consensus::transaction::SignerRecoverable;
+use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 
@@ -20,8 +20,7 @@ struct PoolEntry {
     hash: B256,
     sender: Address,
     nonce: u64,
-    /// Effective tip per gas at the configured base fee. `None` for txs that
-    /// can't pay the base fee (kept, but sorted last).
+    /// Effective tip per gas at the configured base fee.
     effective_tip: u128,
     /// Insertion order — deterministic tie-break (first-seen wins).
     seq: u64,
@@ -29,21 +28,38 @@ struct PoolEntry {
 
 /// In-enclave transaction pool + deterministic tip ordering.
 ///
-/// Mirrors the original guarantor's two side effects faithfully:
-///   * the raw buffer is **drained** on every `get_raw_transactions`, and
-///   * the ordered set is **cleared every `clear_every` calls** to
-///     `best_transaction_hashes` (the legacy "clear once every 7 blocks").
+/// # Nonce handling without chain state
 ///
-/// Both behaviours are configurable so you can revisit them — they were quirks
-/// of the original, not load-bearing invariants.
+/// The enclave never sees on-chain account state — it only has the stream of
+/// submitted transactions. It does **not** need that state to *order* them:
+///
+///   * **Per-sender sequencing.** Within a sender, only the contiguous run of
+///     nonces starting at an anchor is "ready"; anything past a gap is held
+///     ("queued") until the gap fills. A `nonce 0, nonce 2` pair emits only
+///     `0` until `1` arrives.
+///   * **Replace-by-fee.** Two txs sharing `(sender, nonce)` collapse to the
+///     higher-effective-tip one (ties: first-seen).
+///   * **Cross-sender priority.** Ready heads are merged greedily by effective
+///     tip.
+///
+/// The anchor is the lowest nonce seen for the sender, *unless* an on-chain
+/// nonce is supplied via [`Mempool::set_account_nonce`] (an untrusted hint the
+/// host can source from `eth_getTransactionCount`). That hint only refines
+/// readiness — final validity is enforced by the builder when it executes the
+/// ordering, so a wrong hint can at worst make the ordering suboptimal, never
+/// unsafe. This is strictly more faithful than the old "fake the account nonce
+/// per tx" trick, and needs no state-provider abstraction at all.
 #[derive(Debug)]
 pub struct Mempool {
     /// Base fee used to compute effective tips. The builder's pending base fee
     /// should be fed in here; 0 makes tip == priority fee.
     base_fee: u64,
+    /// Optional per-sender on-chain nonce hints (anchors the ready run, drops
+    /// stale txs below it). Untrusted; see the type docs.
+    base_nonces: HashMap<Address, u64>,
     /// Drained wholesale by `get_raw_transactions` (legacy side buffer).
     raw_buffer: Vec<Bytes>,
-    /// The ordered working set, keyed by hash for dedup.
+    /// The working set, keyed by hash for dedup.
     entries: HashMap<B256, PoolEntry>,
     next_seq: u64,
     best_calls: u64,
@@ -68,6 +84,7 @@ impl Mempool {
     pub fn new(base_fee: u64, clear_every: u64) -> Self {
         Self {
             base_fee,
+            base_nonces: HashMap::new(),
             raw_buffer: Vec::new(),
             entries: HashMap::new(),
             next_seq: 0,
@@ -80,6 +97,14 @@ impl Mempool {
         self.base_fee = base_fee;
     }
 
+    /// Supply the on-chain nonce for `sender` (an untrusted hint, e.g. from the
+    /// host's `eth_getTransactionCount`). Anchors that sender's ready run and
+    /// drops any held txs below it. Optional — without it the lowest seen nonce
+    /// is used as the anchor.
+    pub fn set_account_nonce(&mut self, sender: Address, nonce: u64) {
+        self.base_nonces.insert(sender, nonce);
+    }
+
     pub fn stats(&self) -> PoolStats {
         PoolStats {
             raw_buffered: self.raw_buffer.len(),
@@ -90,7 +115,7 @@ impl Mempool {
 
     /// `eth_sendRawTransaction`: decode, recover signer, insert. Returns the
     /// transaction hash. The raw bytes go into both the drain buffer and the
-    /// ordered set, exactly like the original.
+    /// working set.
     pub fn add_raw_transaction(&mut self, raw: Bytes) -> Result<B256, MempoolError> {
         // The canonical tx hash is keccak256 of the EIP-2718 encoding, which is
         // precisely the bytes the submitter sent — hash them directly so we are
@@ -98,8 +123,8 @@ impl Mempool {
         let hash = keccak256(&raw);
 
         let mut slice: &[u8] = raw.as_ref();
-        let envelope = TxEnvelope::decode_2718(&mut slice)
-            .map_err(|e| MempoolError::Decode(e.to_string()))?;
+        let envelope =
+            TxEnvelope::decode_2718(&mut slice).map_err(|e| MempoolError::Decode(e.to_string()))?;
 
         let sender = envelope
             .recover_signer()
@@ -114,14 +139,8 @@ impl Mempool {
         // Drain buffer keeps every submission in arrival order.
         self.raw_buffer.push(raw);
 
-        // Ordered set dedups by hash (a resend doesn't reorder).
-        self.entries.entry(hash).or_insert(PoolEntry {
-            hash,
-            sender,
-            nonce,
-            effective_tip,
-            seq,
-        });
+        // Working set dedups by hash (an identical resend doesn't reorder).
+        self.entries.entry(hash).or_insert(PoolEntry { hash, sender, nonce, effective_tip, seq });
 
         Ok(hash)
     }
@@ -131,13 +150,13 @@ impl Mempool {
         std::mem::take(&mut self.raw_buffer)
     }
 
-    /// `tog_getBestTransactionHashes`: deterministic tip-priority ordering that
-    /// respects per-sender nonce order. Clears the ordered set every
-    /// `clear_every` calls (legacy behaviour).
+    /// `tog_getBestTransactionHashes`: deterministic, gap-aware, tip-priority
+    /// ordering. Clears the working set every `clear_every` calls (legacy
+    /// behaviour).
     pub fn best_transaction_hashes(&mut self) -> Vec<B256> {
         let ordered = self.compute_order();
         self.best_calls += 1;
-        if self.clear_every != 0 && self.best_calls % self.clear_every == 0 {
+        if self.clear_every != 0 && self.best_calls.is_multiple_of(self.clear_every) {
             self.entries.clear();
         }
         ordered
@@ -145,39 +164,73 @@ impl Mempool {
 
     /// Pure ordering computation (no side effects) — exposed for testing.
     fn compute_order(&self) -> Vec<B256> {
-        // Group by sender, each group sorted by ascending nonce so the "head"
-        // is always the next sequential tx for that sender.
-        let mut by_sender: HashMap<Address, Vec<&PoolEntry>> = HashMap::new();
+        // 1. Group by sender; collapse (sender, nonce) collisions replace-by-fee.
+        let mut by_sender: HashMap<Address, BTreeMap<u64, &PoolEntry>> = HashMap::new();
         for e in self.entries.values() {
-            by_sender.entry(e.sender).or_default().push(e);
-        }
-        for q in by_sender.values_mut() {
-            // nonce asc, then seq asc to make equal-nonce resends deterministic.
-            q.sort_by(|a, b| a.nonce.cmp(&b.nonce).then(a.seq.cmp(&b.seq)));
+            let slot = by_sender.entry(e.sender).or_default();
+            match slot.get(&e.nonce) {
+                // Keep the incumbent only if it's strictly preferred.
+                Some(existing) if preferred(existing, e) => {}
+                _ => {
+                    slot.insert(e.nonce, e);
+                }
+            }
         }
 
-        // Greedy merge: repeatedly emit the ready head with the highest tip.
-        // `heads[&sender]` is the index of that sender's next unemitted tx.
-        let mut heads: HashMap<Address, usize> = by_sender.keys().map(|s| (*s, 0)).collect();
-        let mut heap: BinaryHeap<HeapItem> = BinaryHeap::new();
-        for (sender, q) in &by_sender {
-            if let Some(head) = q.first() {
-                heap.push(HeapItem::new(head, *sender));
+        // 2. Per sender, take the contiguous "ready" run from the anchor.
+        let mut ready: HashMap<Address, Vec<&PoolEntry>> = HashMap::new();
+        for (sender, by_nonce) in &by_sender {
+            // Anchor = on-chain hint if known, else the lowest nonce we hold.
+            let anchor = self
+                .base_nonces
+                .get(sender)
+                .copied()
+                .unwrap_or_else(|| *by_nonce.keys().next().expect("non-empty"));
+
+            let mut expected = anchor;
+            let mut run = Vec::new();
+            // range(anchor..) skips stale txs below the anchor and yields the
+            // rest in ascending nonce order.
+            for (&nonce, &e) in by_nonce.range(anchor..) {
+                if nonce == expected {
+                    run.push(e);
+                    expected += 1;
+                } else {
+                    break; // gap: everything from here on is queued
+                }
             }
+            if !run.is_empty() {
+                ready.insert(*sender, run);
+            }
+        }
+
+        // 3. Greedy tip-priority merge of the ready heads.
+        let mut heads: HashMap<Address, usize> = ready.keys().map(|s| (*s, 0)).collect();
+        let mut heap: BinaryHeap<HeapItem> = BinaryHeap::new();
+        for (sender, run) in &ready {
+            heap.push(HeapItem::new(run[0], *sender));
         }
 
         let mut out = Vec::with_capacity(self.entries.len());
         while let Some(item) = heap.pop() {
             out.push(item.hash);
-            let q = &by_sender[&item.sender];
-            let idx = heads.get_mut(&item.sender).unwrap();
+            let run = &ready[&item.sender];
+            let idx = heads.get_mut(&item.sender).expect("sender present");
             *idx += 1;
-            if let Some(next) = q.get(*idx) {
+            if let Some(next) = run.get(*idx) {
                 heap.push(HeapItem::new(next, item.sender));
             }
         }
         out
     }
+}
+
+/// Is `a` strictly preferred over `b` for the same `(sender, nonce)` slot?
+/// Higher effective tip wins (replace-by-fee); ties go to the first-seen tx.
+/// Deterministic regardless of map iteration order.
+fn preferred(a: &PoolEntry, b: &PoolEntry) -> bool {
+    a.effective_tip > b.effective_tip
+        || (a.effective_tip == b.effective_tip && a.seq < b.seq)
 }
 
 /// Heap ordering: higher effective tip first; ties broken by earlier `seq`
@@ -225,9 +278,16 @@ mod tests {
     use alloy_signer::SignerSync;
     use alloy_signer_local::PrivateKeySigner;
 
+    fn signer(key_byte: u8) -> PrivateKeySigner {
+        PrivateKeySigner::from_bytes(&B256::repeat_byte(key_byte)).unwrap()
+    }
+
+    fn sender_of(key_byte: u8) -> Address {
+        signer(key_byte).address()
+    }
+
     /// Build a signed EIP-1559 tx as the raw 2718 bytes a client would submit.
     fn raw_tx(key_byte: u8, nonce: u64, priority_fee: u128) -> Bytes {
-        let signer = PrivateKeySigner::from_bytes(&B256::repeat_byte(key_byte)).unwrap();
         let tx = TxEip1559 {
             chain_id: 10,
             nonce,
@@ -239,7 +299,7 @@ mod tests {
             access_list: Default::default(),
             input: Default::default(),
         };
-        let sig = signer.sign_hash_sync(&tx.signature_hash()).unwrap();
+        let sig = signer(key_byte).sign_hash_sync(&tx.signature_hash()).unwrap();
         let env: TxEnvelope = tx.into_signed(sig).into();
         Bytes::from(env.encoded_2718())
     }
@@ -270,6 +330,44 @@ mod tests {
         let n0 = pool.add_raw_transaction(raw_tx(0x11, 0, 1)).unwrap();
         let n1 = pool.add_raw_transaction(raw_tx(0x11, 1, 999)).unwrap();
         assert_eq!(pool.best_transaction_hashes(), vec![n0, n1]);
+    }
+
+    #[test]
+    fn holds_transactions_after_a_nonce_gap() {
+        let mut pool = Mempool::new(0, 0);
+        let n0 = pool.add_raw_transaction(raw_tx(0x11, 0, 9)).unwrap();
+        let _n2 = pool.add_raw_transaction(raw_tx(0x11, 2, 9)).unwrap(); // gap at 1
+        // only nonce 0 is ready; nonce 2 is queued behind the gap
+        assert_eq!(pool.best_transaction_hashes(), vec![n0]);
+
+        // fill the gap -> all three become ready, in nonce order
+        let n1 = pool.add_raw_transaction(raw_tx(0x11, 1, 9)).unwrap();
+        let best = pool.best_transaction_hashes();
+        assert_eq!(best.len(), 3);
+        assert_eq!(best[0], n0);
+        assert_eq!(best[1], n1);
+    }
+
+    #[test]
+    fn replace_by_fee_keeps_higher_tip() {
+        let mut pool = Mempool::new(0, 0);
+        let cheap = pool.add_raw_transaction(raw_tx(0x11, 0, 1)).unwrap();
+        let rich = pool.add_raw_transaction(raw_tx(0x11, 0, 100)).unwrap(); // same nonce
+        assert_ne!(cheap, rich);
+        assert_eq!(pool.stats().pooled, 2); // both stored
+        // but only the higher-fee one is selected for the slot
+        assert_eq!(pool.best_transaction_hashes(), vec![rich]);
+    }
+
+    #[test]
+    fn account_nonce_hint_drops_stale_and_anchors() {
+        let mut pool = Mempool::new(0, 0);
+        // sender holds nonces 5 and 6
+        let _n5 = pool.add_raw_transaction(raw_tx(0x11, 5, 9)).unwrap();
+        let n6 = pool.add_raw_transaction(raw_tx(0x11, 6, 9)).unwrap();
+        // on-chain nonce is 6 -> nonce 5 is stale, only 6 is ready
+        pool.set_account_nonce(sender_of(0x11), 6);
+        assert_eq!(pool.best_transaction_hashes(), vec![n6]);
     }
 
     #[test]

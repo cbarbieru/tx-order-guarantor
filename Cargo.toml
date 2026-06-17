@@ -1,18 +1,13 @@
-[package]
-name = "tx-order-guarantor"
-version = "0.1.0"
-edition = "2024"
-
-# ── SGX refactor workspace ──────────────────────────────────────────────────
-# The root package (tx-order-guarantor) is the LEGACY monolith and still builds
-# and runs exactly as before — nothing here breaks it. The new trusted/untrusted
-# split lives under `crates/`. See docs/sgx-refactor.md for the full picture.
+# Virtual workspace for the SGX transaction-order-guarantor.
 #
 #   crates/tog-proto    wire protocol shared by enclave <-> clients (pure, no C)
 #   crates/tog-core     the TCB: pure-Rust mempool + tip ordering (unit-tested)
 #   crates/tog-enclave  the SGX enclave binary (RA-TLS listener on SGX target;
 #                       plaintext dev server on a normal host target)
-#   crates/tog-host     the untrusted passthrough eth_* proxy to the builder
+#   crates/tog-host     the untrusted passthrough eth_* proxy
+#   crates/tog-client   test/reference client + RA-TLS verifier
+#
+# See README.md for architecture, build & SGX-host setup.
 [workspace]
 resolver = "2"
 members = [
@@ -22,42 +17,3 @@ members = [
     "crates/tog-host",
     "crates/tog-client",
 ]
-
-[dependencies]
-tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread"] }
-async-trait = "0.1.83"
-serde_json = {version = "1.0.141"}
-anyhow = "1.0"
-
-thiserror = { version = "1.0.64" }
-eyre = { version = "0.6.12" }
-
-# JSON-RPC server framework
-jsonrpsee = { version = "0.25.1", features = ["server", "macros"] }
-jsonrpsee-types = { version = "0.25.1" }
-jsonrpsee-core = { version = "0.25.1" }
-
-revm-database = "7.0.1"
-
-# Alloy Ethereum types (ERC-4337)
-alloy-primitives = "1.0.23"
-alloy-eips = "1.0.23"
-alloy-consensus = "1.0.23"
-alloy-genesis = { version = "1.0.23" }
-
-# Reth ecosystem
-reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-storage-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0", default-features = false }
-reth-db-models = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-tasks = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-optimism-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-optimism-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-optimism-txpool = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }
-reth-optimism-rpc = { git = "https://github.com/paradigmxyz/reth", tag = "v1.6.0" }

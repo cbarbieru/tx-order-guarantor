@@ -11,14 +11,21 @@
 #       --device /dev/sgx_enclave --device /dev/sgx_provision \
 #       -v /var/run/aesmd:/var/run/aesmd \
 #       -e TOG_ENCLAVE_BIND=0.0.0.0:1546 \
-#       -e ENCLAVE_MANAGER_URL=... \
+#       -e NODE_AGENT_URL=http://localhost:9092 -e TOG_TLS_CN=tog-enclave \
 #       -p 1546:1546 \
 #       tog-enclave
 
 # ── Stage 1: build the enclave + convert/sign it ────────────────────────────
-FROM rust:1.83-bookworm AS build
+# Fortanix EDP requires Rust nightly.
+FROM rustlang/rust:nightly-bookworm AS build
 
-# Fortanix EDP toolchain.
+# Build deps: the Fortanix tools build aesm-client (protobuf), and the SGX
+# RA-TLS deps (mbedtls / em-app) need a C toolchain + cmake when enabled.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake clang pkg-config libssl-dev protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fortanix EDP toolchain (the base image's default toolchain is nightly).
 RUN rustup target add x86_64-fortanix-unknown-sgx \
     && cargo install fortanix-sgx-tools sgxs-tools
 
