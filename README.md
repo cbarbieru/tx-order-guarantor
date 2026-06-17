@@ -82,11 +82,18 @@ transactions. [`tog-core::Mempool`](crates/tog-core/src/mempool.rs):
 * **cross-sender priority** — ready heads merged greedily by effective tip.
 
 The anchor is the lowest nonce seen, unless an on-chain nonce is supplied via
-`Mempool::set_account_nonce` (an untrusted hint the host can source from
-`eth_getTransactionCount`). The hint only refines readiness — final validity is
-enforced by the builder when it executes the ordering — so a wrong hint can at
-worst make the ordering suboptimal, never unsafe. This replaces the old "fake
-the account nonce per tx" trick and needs no state-provider abstraction.
+`Mempool::set_account_nonce` — an untrusted hint that only refines readiness
+(final validity is enforced by the builder when it executes the ordering, so a
+wrong hint can at worst make the ordering suboptimal, never unsafe). This
+replaces the old "fake the account nonce per tx" trick and needs no
+state-provider abstraction.
+
+> Note: `set_account_nonce` is currently an **in-enclave API only** — it is not
+> yet exposed over the wire protocol, so today the enclave always anchors on the
+> lowest nonce it has seen. Wiring a hint channel is deferred: in the
+> direct-RA-TLS model the untrusted host never sees decrypted txs (hence not the
+> senders), so a future hint would come from the builder's get-best request or
+> an enclave-initiated `eth_getTransactionCount` call.
 
 ## Build & run
 
