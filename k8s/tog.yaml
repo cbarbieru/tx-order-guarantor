@@ -1,0 +1,108 @@
+# Transaction Order Guarantor — single-pod deployment + service.
+#
+# MODE: real SGX, plaintext transport + STUB attestation.
+# The enclave runs in a genuine SGX enclave (device-plugin EPC request below) but
+# does no TLS/attestation yet — it presents a FAKE attestation (TOG_STUB_ATTEST=1).
+# No Enclave Manager, no node agent, no aesmd. A real attested transport is
+# future work; when it lands, add the attestation infra here.
+#
+# One pod, two containers (shared network namespace → both listeners on pod IP):
+#   * tog-host     :1545  untrusted eth_* passthrough proxy → builder
+#   * tog-enclave  :1546  real SGX enclave; plaintext + TOG_STUB_ATTEST=1
+#
+# PREREQUISITES:
+#   * SGX2 nodes (e.g. AKS confidential-computing / Azure DCsv3) with the Intel
+#     SGX device plugin (AKS: `confcom` addon) exposing `sgx.intel.com/epc` and
+#     mounting /dev/sgx_enclave into requesting containers — no privileged/hostPath.
+#     (Some plugin versions split this into sgx.intel.com/enclave + .../provision.)
+#   * Images built and pushed to a registry the cluster can pull:
+#       docker build -f Dockerfile.enclave -t <repo>/tog-enclave .
+#       docker build -f Dockerfile.host    -t <repo>/tog-host .
+#     (kind/minikube: load locally and set imagePullPolicy: Never.)
+#   * Clients connect with `--attest-stub` (they read the fake attestation).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tog
+  labels:
+    app: tog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tog
+  template:
+    metadata:
+      labels:
+        app: tog
+    spec:
+      # Requesting sgx.intel.com/epc below already steers the pod onto an SGX node.
+      containers:
+        # ── the enclave: real SGX, plaintext + stub attestation ─────────────
+        - name: tog-enclave
+          image: tog-enclave:latest            # built from Dockerfile.enclave
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: tog
+              containerPort: 1546
+          env:
+            - name: TOG_ENCLAVE_BIND
+              value: "0.0.0.0:1546"
+            - name: TOG_BASE_FEE
+              value: "0"
+            # Present a FAKE attestation to clients (dev). Real attestation TBD.
+            - name: TOG_STUB_ATTEST
+              value: "1"
+          resources:
+            limits:
+              # Real SGX: must be <= the node's EPC and >= the enclave heap-size in
+              # crates/tog-enclave/Cargo.toml ([package.metadata.fortanix-sgx]).
+              sgx.intel.com/epc: 2Gi
+              # sgx.intel.com/enclave: 1         # on plugins that split the resources
+          readinessProbe:
+            tcpSocket:
+              port: 1546
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+        # ── untrusted passthrough proxy (no SGX; rides along in this pod) ────
+        - name: tog-host
+          image: tog-host:latest                # built from Dockerfile.host
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: rpc
+              containerPort: 1545
+          env:
+            - name: TOG_HOST_BIND
+              value: "0.0.0.0:1545"
+            - name: BUILDER_HOST
+              value: "op-rbuilder"
+            - name: BUILDER_PORT
+              value: "8545"
+          readinessProbe:
+            tcpSocket:
+              port: 1545
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tog
+  labels:
+    app: tog
+spec:
+  # ClusterIP by default (in-cluster). For external access use LoadBalancer or
+  # NodePort. Note: when a real attested transport lands, submitters must reach
+  # :1546 directly (L4, not a TLS-terminating L7 proxy) for the guarantee.
+  type: ClusterIP
+  selector:
+    app: tog
+  ports:
+    - name: rpc            # eth_* passthrough → builder
+      port: 1545
+      targetPort: 1545
+    - name: tog            # enclave protocol (plaintext + stub attestation)
+      port: 1546
+      targetPort: 1546

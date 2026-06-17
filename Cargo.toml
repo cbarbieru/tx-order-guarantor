@@ -2,10 +2,10 @@
 #
 #   crates/tog-proto    wire protocol shared by enclave <-> clients (pure, no C)
 #   crates/tog-core     the TCB: pure-Rust mempool + tip ordering (unit-tested)
-#   crates/tog-enclave  the SGX enclave binary (RA-TLS listener on SGX target;
-#                       plaintext dev server on a normal host target)
+#   crates/tog-enclave  the SGX enclave binary (plaintext listener; runs in a
+#                       real enclave, plaintext dev server on a normal host)
 #   crates/tog-host     the untrusted passthrough eth_* proxy
-#   crates/tog-client   test/reference client + RA-TLS verifier
+#   crates/tog-client   test/reference client (+ dev stub attestation)
 #
 # See README.md for architecture, build & SGX-host setup.
 [workspace]

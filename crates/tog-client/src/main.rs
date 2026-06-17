@@ -1,7 +1,6 @@
 //! CLI for the enclave protocol.
 //!
-//!   tog-client [--addr H:P] <command>                       # plaintext (dev)
-//!   tog-client [--addr H:P] --ratls --ca CA.pem [--server-name CN] <command>
+//!   tog-client [--addr H:P] [--attest-stub] <command>       # plaintext
 //!
 //! Commands:
 //!   send <0xRAWTX>   submit a raw transaction, print its hash
@@ -9,38 +8,30 @@
 //!   get-best         print the enclave-computed ordering
 //!   demo             send sample txs (distinct tips), then show the ordering
 //!
-//! `--ratls` requires building with `--features ratls`.
+//! `--attest-stub` reads a FAKE attestation from a dev enclave started with
+//! `TOG_STUB_ATTEST=1` (proves nothing — for developing the flow without SGX).
 
 use std::error::Error;
 use std::io::{Read, Write};
 
-use tog_client::{connect_plain, sample_raw_tx, Client};
+use tog_client::{Client, connect_plain, sample_raw_tx};
 
 struct Args {
     addr: String,
-    ratls: bool,
-    // Read only under `--features ratls`; harmless dead fields otherwise.
-    #[cfg_attr(not(feature = "ratls"), allow(dead_code))]
-    ca: Option<String>,
-    #[cfg_attr(not(feature = "ratls"), allow(dead_code))]
-    server_name: Option<String>,
+    attest_stub: bool,
     rest: Vec<String>,
 }
 
 fn parse_args() -> Args {
     let mut addr = "127.0.0.1:1546".to_string();
-    let mut ratls = false;
-    let mut ca = None;
-    let mut server_name = None;
+    let mut attest_stub = false;
     let mut rest = Vec::new();
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--addr" => addr = it.next().unwrap_or(addr),
-            "--ratls" => ratls = true,
-            "--ca" => ca = it.next(),
-            "--server-name" => server_name = it.next(),
+            "--attest-stub" => attest_stub = true,
             "-h" | "--help" => {
                 print_usage();
                 std::process::exit(0);
@@ -48,12 +39,12 @@ fn parse_args() -> Args {
             _ => rest.push(arg),
         }
     }
-    Args { addr, ratls, ca, server_name, rest }
+    Args { addr, attest_stub, rest }
 }
 
 fn print_usage() {
     eprintln!(
-        "usage: tog-client [--addr H:P] [--ratls --ca CA.pem [--server-name CN]] <command>\n\
+        "usage: tog-client [--addr H:P] [--attest-stub] <command>\n\
          commands: send <0xRAWTX> | get-raw | get-best | demo"
     );
 }
@@ -61,26 +52,29 @@ fn print_usage() {
 fn main() -> Result<(), Box<dyn Error>> {
     let args = parse_args();
 
-    if args.ratls {
-        connect_ratls_and_run(&args)
-    } else {
-        let mut client = connect_plain(&args.addr)?;
-        eprintln!("connected (plaintext) to {}", args.addr);
-        run(&mut client, &args.rest)
+    let mut client = connect_plain(&args.addr)?;
+    eprintln!("connected (plaintext) to {}", args.addr);
+
+    if args.attest_stub {
+        match client.read_stub_attestation() {
+            Ok(att) if att.stub => {
+                eprintln!("🔒 attestation: STUB (dev) — peer claims SGX identity:");
+                eprintln!("     mr_enclave = {}", att.mr_enclave);
+                eprintln!("     mr_signer  = {}", att.mr_signer);
+                eprintln!("     ⚠ {}", att.note);
+            }
+            Ok(_) => return Err("peer sent a non-stub attestation".into()),
+            Err(e) => {
+                return Err(format!(
+                    "--attest-stub expects a stub attestation first; \
+                     start the enclave with TOG_STUB_ATTEST=1 ({e})"
+                )
+                .into());
+            }
+        }
     }
-}
 
-#[cfg(feature = "ratls")]
-fn connect_ratls_and_run(args: &Args) -> Result<(), Box<dyn Error>> {
-    let ca = args.ca.as_deref().ok_or("--ratls requires --ca <CA.pem>")?;
-    let mut client = tog_client::connect_ratls(&args.addr, ca, args.server_name.as_deref())?;
-    eprintln!("connected (RA-TLS, verified against {ca}) to {}", args.addr);
     run(&mut client, &args.rest)
-}
-
-#[cfg(not(feature = "ratls"))]
-fn connect_ratls_and_run(_args: &Args) -> Result<(), Box<dyn Error>> {
-    Err("this binary was built without RA-TLS; rebuild with `--features ratls`".into())
 }
 
 fn run<S: Read + Write>(client: &mut Client<S>, cmd: &[String]) -> Result<(), Box<dyn Error>> {

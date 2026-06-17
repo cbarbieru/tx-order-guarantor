@@ -3,7 +3,7 @@
 //! Forwards read-only `eth_*` calls to the builder. The order-sensitive methods
 //! (`eth_sendRawTransaction`, `tog_getRawTransactions`,
 //! `tog_getBestTransactionHashes`) are NOT served here — clients and the builder
-//! reach those directly on the enclave's RA-TLS endpoint.
+//! reach those directly on the enclave's endpoint.
 
 use std::env;
 use std::net::SocketAddr;

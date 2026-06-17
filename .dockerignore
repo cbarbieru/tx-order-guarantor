@@ -1,0 +1,13 @@
+# Keep the Docker build context small and host-agnostic — the build stage
+# compiles from source, so none of these belong in the image.
+target
+**/target
+.git
+.gitignore
+.dockerignore
+*.sgxs
+*.sig
+signing-key.pem
+.DS_Store
+.claude
+.vscode

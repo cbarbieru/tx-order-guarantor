@@ -3,8 +3,11 @@
 Runs the **transaction ordering** (the mempool) inside an Intel SGX enclave as
 the smallest trusted unit, with all passthrough/communication outside. One input
 (`send_raw_transaction`) terminates inside the enclave; two outputs
-(`get_raw_transactions`, `get_best_transaction_hashes`) are read from it. The
-enclave is attestable via RA-TLS (Fortanix **Enclave Manager**).
+(`get_raw_transactions`, `get_best_transaction_hashes`) are read from it.
+
+**Attestation is currently a dev stub** and the transport is **plaintext** (even
+inside a real enclave). A real attested transport is future work — see
+[Attestation](#attestation).
 
 ## Showstoppers / things you must provide (read first)
 
@@ -22,13 +25,10 @@ enclave is attestable via RA-TLS (Fortanix **Enclave Manager**).
    therefore **reimplemented in pure Rust** in `crates/tog-core`.
 3. **Rust nightly is required** by Fortanix EDP (`rustup target add … --toolchain
    nightly`).
-4. **You install the SGX stack on the Linux host yourself** (driver, PSW + AESM,
-   DCAP libs, Fortanix tools — see [Build-host setup](#build-host-setup-linux-sgx-box)).
-5. **Enclave Manager account.** RA-TLS uses Fortanix Enclave Manager for cert
-   issuance; you need an EM account, the enclave registered (MRENCLAVE /
-   MRSIGNER), and the EM **node agent** running. Without it, the enclave still
-   runs in **plaintext dev mode**.
-6. **In-enclave time is untrusted and the pool is volatile.** `SystemTime` is a
+4. **You install the SGX driver + Fortanix tools on the Linux host yourself**
+   (see [Build-host setup](#build-host-setup-linux-sgx-box)). PSW/AESM/DCAP are
+   only needed once a real attested transport is added.
+5. **In-enclave time is untrusted and the pool is volatile.** `SystemTime` is a
    host usercall (host can lie); enclave memory is wiped on restart (no sealing
    yet). Fine for an ephemeral mempool — just know it.
 
@@ -39,29 +39,30 @@ enclave is attestable via RA-TLS (Fortanix **Enclave Manager**).
    eth_* (RO) ─────►│  tog-host : jsonrpsee proxy ──► builder (op-rbuilder)        │
                     └─────────────────────────────────────────────────────────────┘
 
-   submitters ─── RA-TLS ───►┐
-   builder    ─── RA-TLS ───►│  tog-enclave (SGX)  : terminates TLS *inside*,
-                             │   ├─ send_raw_transaction   (input)
-                             │   ├─ get_raw_transactions   (output, drains buffer)
-                             └─► └─ get_best_transaction_hashes (output, ordering)
-                                  state: tog-core::Mempool (in enclave memory)
+   submitters ── plaintext ──►┐   (stub-attested for now)
+   builder    ── plaintext ──►│  tog-enclave (SGX)  : runs in a real enclave,
+                              │   ├─ send_raw_transaction   (input)
+                              │   ├─ get_raw_transactions   (output, drains buffer)
+                              └─► └─ get_best_transaction_hashes (output, ordering)
+                                   state: tog-core::Mempool (in enclave memory)
 ```
 
-* **Direct RA-TLS to the enclave** (the chosen trust model): the untrusted
-  runner/host only sees ciphertext, so it cannot drop, reorder, read or inject
-  transactions. That is what makes the ordering "guarantee" meaningful. If you
-  ever relay ingestion through the host instead, the host re-enters the
-  integrity path and the guarantee weakens to "the host behaved".
+* **Direct to the enclave** (the chosen trust model): clients talk to the enclave
+  rather than relaying ingestion through the untrusted host — keeping the host
+  out of the integrity path. Today that channel is **plaintext with a stub
+  attestation**, so the confidentiality/tamper-evidence guarantee is *not* in
+  place yet; a real attested transport (see [Attestation](#attestation)) restores
+  it without changing this topology.
 
 ### Crates
 
 | crate         | target                         | role |
 |---------------|--------------------------------|------|
-| `tog-proto`   | any (pure)                     | length-prefixed JSON wire protocol (3 ops) |
+| `tog-proto`   | any (pure)                     | length-prefixed JSON wire protocol (3 ops + stub attestation) |
 | `tog-core`    | any (pure)                     | **TCB**: decode + signer recovery + tip ordering, unit-tested |
-| `tog-enclave` | `x86_64-fortanix-unknown-sgx`  | RA-TLS listener (no Tokio), dispatches to `tog-core` |
+| `tog-enclave` | `x86_64-fortanix-unknown-sgx`  | client listener (no Tokio), dispatches to `tog-core` |
 | `tog-host`    | normal                         | untrusted `eth_*` passthrough proxy |
-| `tog-client`  | normal                         | test/reference client + RA-TLS verifier (`ratls` feature) |
+| `tog-client`  | normal                         | test/reference client (+ dev stub attestation) |
 
 ### No-Tokio model
 
@@ -88,12 +89,12 @@ wrong hint can at worst make the ordering suboptimal, never unsafe). This
 replaces the old "fake the account nonce per tx" trick and needs no
 state-provider abstraction.
 
-> Note: `set_account_nonce` is currently an **in-enclave API only** — it is not
-> yet exposed over the wire protocol, so today the enclave always anchors on the
-> lowest nonce it has seen. Wiring a hint channel is deferred: in the
-> direct-RA-TLS model the untrusted host never sees decrypted txs (hence not the
-> senders), so a future hint would come from the builder's get-best request or
-> an enclave-initiated `eth_getTransactionCount` call.
+> Note: `set_account_nonce` is currently an **in-enclave API only** — not yet
+> exposed over the wire, so the enclave anchors on the lowest nonce it has seen.
+> Wiring a hint channel is deferred: in the direct-to-enclave model the untrusted
+> host never sees decrypted txs (hence not the senders), so a future hint would
+> come from the builder's get-best request or an enclave-initiated
+> `eth_getTransactionCount` call.
 
 ## Build & run
 
@@ -101,7 +102,7 @@ state-provider abstraction.
 
 ```bash
 cargo test  -p tog-proto -p tog-core   # the logic that matters, verifiable locally
-cargo run   -p tog-enclave             # PLAINTEXT dev server on :1546 (not attested)
+cargo run   -p tog-enclave             # PLAINTEXT dev server on :1546
 cargo run   -p tog-host                # passthrough proxy on :1545
 ```
 
@@ -114,14 +115,27 @@ cargo run -p tog-client -- --addr 127.0.0.1:1546 demo
 
 cargo run -p tog-client -- send 0x02f8...      # submit a real raw tx
 cargo run -p tog-client -- get-best            # print the ordering
-
-# Against the real enclave, verifying its EM-issued cert (host-side, builds
-# mbedtls — needs cmake + a C compiler, but NOT SGX, so it compiles anywhere):
-cargo run -p tog-client --features ratls -- \
-    --ratls --ca em-ca.pem --server-name tog-enclave --addr ENCLAVE_HOST:1546 demo
 ```
 
 The plaintext `demo` path is verified working end-to-end on an arm64 Mac.
+
+#### Dev stub attestation
+
+The enclave can present a FAKE attestation so the *attested-channel shape* — peer
+presents an attestation, the client surfaces/gates on it, then the session
+proceeds — can be exercised before a real transport exists. Opt in on **both**
+ends (runtime, no rebuild):
+
+```bash
+TOG_STUB_ATTEST=1 cargo run -p tog-enclave            # enclave sends a FAKE attestation
+cargo run -p tog-client -- --attest-stub demo         # client surfaces it, then runs
+#   🔒 attestation: STUB (dev) — mr_enclave=0xdede… mr_signer=0xbebe…  ⚠ proves NOTHING
+```
+
+It's deliberately unmistakable: a `stub: true` tripwire + placeholder
+measurements + a "NOT A REAL SGX QUOTE" note. Both ends must opt in (the
+attestation is an app-level frame, so a one-sided mismatch desyncs the stream).
+This works the same on the host dev server and inside a real enclave.
 
 ### Enclave (Linux SGX host, nightly)
 
@@ -129,12 +143,10 @@ The plaintext `demo` path is verified working end-to-end on an arm64 Mac.
 rustup target add x86_64-fortanix-unknown-sgx --toolchain nightly
 cargo install fortanix-sgx-tools sgxs-tools
 
-# uncomment the [target.'cfg(target_env = "sgx")'.dependencies] block in
-#   crates/tog-enclave/Cargo.toml  (em-app + mbedtls)
 cargo +nightly build --release -p tog-enclave --target x86_64-fortanix-unknown-sgx
 
 # with the runner configured (see setup §5), this converts + signs + runs:
-cargo +nightly run -p tog-enclave --target x86_64-fortanix-unknown-sgx
+TOG_STUB_ATTEST=1 cargo +nightly run -p tog-enclave --target x86_64-fortanix-unknown-sgx
 # …or do it by hand:
 ftxsgx-elf2sgxs target/x86_64-fortanix-unknown-sgx/release/tog-enclave \
     --heap-size 2147483648 --stack-size 262144 --threads 16 --debug \
@@ -143,13 +155,35 @@ sgxs-sign --key signing-key.pem tog-enclave.sgxs tog-enclave.sig
 ftxsgx-runner tog-enclave.sgxs
 ```
 
-Docker: see [`Dockerfile.enclave`](Dockerfile.enclave) (run with
-`--device /dev/sgx_enclave --device /dev/sgx_provision` and the AESM socket
-mounted). It cannot be built/run on a Mac.
+The plaintext transport means the SGX build needs no TLS/attestation deps.
+
+### Docker (build with no Rust on the host)
+
+`Dockerfile.enclave` is multi-stage: the nightly toolchain + Fortanix tools live
+in the build stage, so the build host needs **only Docker** (build it on any
+x86_64 Linux, incl. CI — no SGX hardware needed just to *build*). Running needs
+the kernel SGX driver passed in; on FLC hardware (which EDP requires) no AESM is
+needed to launch.
+
+```bash
+docker build -f Dockerfile.enclave -t tog-enclave .
+docker build -f Dockerfile.host    -t tog-host .
+
+docker run --rm --device /dev/sgx_enclave \
+  -e TOG_ENCLAVE_BIND=0.0.0.0:1546 -e TOG_STUB_ATTEST=1 -p 1546:1546 \
+  tog-enclave
+```
+
+Docker isolates the binary, not the silicon — SGX is hardware and can't be
+virtualized away; the machine that runs the enclave needs the SGX device.
+Kubernetes: [`k8s/tog.yaml`](k8s/tog.yaml) deploys both containers in one pod
+with the SGX device-plugin EPC request and `TOG_STUB_ATTEST=1`.
 
 ## Build-host setup (Linux SGX box)
 
-Ubuntu 22.04 x86_64. Building needs only steps 3–5; running/testing needs 0–2 + 6.
+Ubuntu 22.04/24.04 x86_64. For the current (stub) mode you need steps 0–1 + 3–6;
+step 2 (PSW/AESM/DCAP) is only for a real attested transport later. If you only
+ever ship via Docker, steps 3–5 live in the image's build stage.
 
 **0. Hardware / VM** — CPU with SGX **+ FLC**; for SGX2 / large EPC use Azure
 DCsv3 / DCdsv3 (pre-enabled) or Ice Lake / Sapphire Rapids bare metal (enable SGX
@@ -159,21 +193,32 @@ in BIOS, not "software controlled"). Kernel ≥ 5.11.
 /dev/sgx_provision` and add yourself to the `sgx` group. Older kernels: install
 Intel's out-of-tree DCAP driver (`/dev/isgx`).
 
-**2. PSW + AESM** (to run + attest):
+**2. PSW + AESM** — *only needed for a real attested transport (future).* Use the
+keyring method (`apt-key` is deprecated/removed on recent Ubuntu):
 ```bash
-echo "deb https://download.01.org/intel-sgx/sgx_repo/ubuntu $(lsb_release -cs) main" \
+curl -fsSL https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/intel-sgx.gpg
+echo "deb [signed-by=/usr/share/keyrings/intel-sgx.gpg] https://download.01.org/intel-sgx/sgx_repo/ubuntu $(lsb_release -cs) main" \
   | sudo tee /etc/apt/sources.list.d/intel-sgx.list
-curl -sSL https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key | sudo apt-key add -
 sudo apt-get update
-sudo apt-get install -y sgx-aesm-service libsgx-aesm-launch-plugin \
-    libsgx-aesm-quote-ex-plugin libsgx-aesm-ecdsa-plugin \
-    libsgx-dcap-ql libsgx-dcap-default-qpl
+# EDP requires FLC hardware, which does NOT need the legacy launch plugin
+# (libsgx-aesm-launch-plugin) — installing it pins libsgx-urts to an older
+# version and breaks the DCAP deps. Install the consistent runtime + DCAP set:
+sudo apt-get install -y \
+    libsgx-enclave-common libsgx-urts libsgx-pce-logic libsgx-qe3-logic \
+    sgx-aesm-service libsgx-aesm-pce-plugin libsgx-aesm-ecdsa-plugin \
+    libsgx-aesm-quote-ex-plugin libsgx-dcap-ql libsgx-dcap-default-qpl
 ```
-Check `systemctl status aesmd` and `/var/run/aesmd/aesm.socket`.
+Check `systemctl status aesmd` and `/var/run/aesmd/aesm.socket`. (Unrelated
+`NO_PUBKEY` errors from other repos — e.g. a stale Yarn source — will fail
+`apt-get update`; remove or re-key those sources first. If you still hit unmet
+deps on `libsgx-pce-logic`/`libsgx-urts`, a stray `libsgx-aesm-launch-plugin` is
+pinning an old `libsgx-urts` — `sudo apt-get remove -y libsgx-aesm-launch-plugin`,
+re-run `apt-get update`, and reinstall the set above.)
 
-**3. Build deps** (Fortanix tools + the C deps `mbedtls` pulls in):
+**3. Build deps** (the C deps the Fortanix tools need + openssl for signing):
 ```bash
-sudo apt-get install -y build-essential cmake pkg-config libssl-dev protobuf-compiler
+sudo apt-get install -y build-essential pkg-config libssl-dev protobuf-compiler
 ```
 
 **4. Rust nightly + the EDP target:**
@@ -190,41 +235,21 @@ sgxs-tools`, then add to `~/.cargo/config.toml`:
 runner = "ftxsgx-runner-cargo"
 ```
 
-**6. Verify the box:** `sgx-detect` (reports SGX enabled, driver, AESM, and
-whether it can actually run an enclave).
+**6. Verify the box:** `sgx-detect` (reports SGX enabled, driver, and whether it
+can actually run an enclave).
 
-## RA-TLS via Enclave Manager — implemented (best-effort, build on Linux)
+## Attestation
 
-[`crates/tog-enclave/src/transport.rs`](crates/tog-enclave/src/transport.rs)
-contains the real wiring under `cfg(target_env = "sgx")`, matching the documented
-`em-app` / Fortanix `mbedtls` APIs:
+The enclave currently has **no real attestation**: the transport is plaintext,
+and `TOG_STUB_ATTEST=1` makes it present a fake attestation document that
+`tog-client --attest-stub` reads (see [Dev stub attestation](#dev-stub-attestation)).
+This is enough to develop and integrate the end-to-end flow on real SGX.
 
-1. `Transport::init()` (once, at startup): generate an in-enclave RSA key
-   (`Pk::generate_rsa(&mut Rdrand, 3072, 0x10001)`), call
-   `em_app::get_fortanix_em_certificate(node_agent_url, cn, &mut key)` — EM
-   verifies the MRENCLAVE/MRSIGNER quote and returns an issued cert — then build
-   a reusable `mbedtls::ssl::Config` (`set_rng` + `push_cert`).
-2. `Transport::accept()` (per connection): `Context::establish(stream, None)`.
-   TLS terminates inside the enclave; the `Context` is `Read + Write`, so the
-   dispatch loop is unchanged.
-
-Clients verify the cert with `tog-client --features ratls` (mbedtls client,
-`AuthMode::Required`, CA = Enclave Manager root). Reference:
-<https://edp.fortanix.com/docs/> and the `em-app` examples.
-
-**To build it on the Linux SGX box:**
-
-* Uncomment the `[target.'cfg(target_env = "sgx")'.dependencies]` block in
-  `crates/tog-enclave/Cargo.toml` (`em-app` via git, `mbedtls`). Let `em-app`
-  drive the `mbedtls` version if resolution conflicts.
-* Set `NODE_AGENT_URL` (EM node agent) and `TOG_TLS_CN` env vars.
-* **Verify one field name:** `transport.rs` reads the issued PEM from
-  `issued.certificate_response.certificate`. Confirm that against your
-  `em_node_agent_client::models` version — if it's a plain `String` (not
-  `Option<String>`), drop the `ok_or`. This is the most likely first compile error.
-
-The SGX path **cannot be compiled or tested on a Mac**. The host build keeps it
-`cfg`-gated, so `cargo check -p tog-enclave` stays green everywhere.
+A real attested transport (terminating TLS inside the enclave, with the SGX quote
+bound to the TLS key and verified by clients) is **future work**. The transport
+seam is [`crates/tog-enclave/src/transport.rs`](crates/tog-enclave/src/transport.rs)
+(`Transport::init` / `Transport::accept` → a `Read + Write` `Session`), so it can
+be added without touching `main.rs` or the protocol.
 
 ## Validate against your builder
 

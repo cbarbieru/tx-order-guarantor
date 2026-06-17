@@ -1,28 +1,27 @@
 # syntax=docker/dockerfile:1
 #
-# SGX runtime image for the tog-enclave (Fortanix EDP).
+# SGX image for the tog-enclave (Fortanix EDP).
 #
-# This is a STARTING POINT, not a validated build — it must be iterated on your
-# Linux SGX box. It cannot be built or run on the Apple-Silicon dev Mac (no SGX
-# hardware, ARM CPU). Build/run on an SGX2 host (e.g. Azure DCsv3/DCdsv3).
+# Transport is PLAINTEXT and attestation is the dev STUB (TOG_STUB_ATTEST) — so
+# no Enclave Manager, no mbedtls, and no AESM are needed. The enclave still runs
+# in a REAL enclave (the runtime needs the kernel SGX driver passed in).
+#
+# This is a STARTING POINT — iterate on your Linux SGX box. It cannot be built or
+# run on an Apple-Silicon Mac (no SGX, ARM CPU). Build/run on an SGX2 host
+# (e.g. Azure DCsv3/DCdsv3).
 #
 #   docker build -f Dockerfile.enclave -t tog-enclave .
-#   docker run --rm \
-#       --device /dev/sgx_enclave --device /dev/sgx_provision \
-#       -v /var/run/aesmd:/var/run/aesmd \
-#       -e TOG_ENCLAVE_BIND=0.0.0.0:1546 \
-#       -e NODE_AGENT_URL=http://localhost:9092 -e TOG_TLS_CN=tog-enclave \
-#       -p 1546:1546 \
-#       tog-enclave
+#   docker run --rm --device /dev/sgx_enclave \
+#       -e TOG_ENCLAVE_BIND=0.0.0.0:1546 -e TOG_STUB_ATTEST=1 \
+#       -p 1546:1546 tog-enclave
 
 # ── Stage 1: build the enclave + convert/sign it ────────────────────────────
 # Fortanix EDP requires Rust nightly.
 FROM rustlang/rust:nightly-bookworm AS build
 
-# Build deps: the Fortanix tools build aesm-client (protobuf), and the SGX
-# RA-TLS deps (mbedtls / em-app) need a C toolchain + cmake when enabled.
+# Build deps for the Fortanix tools (aesm-client → protobuf) and signing (openssl).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake clang pkg-config libssl-dev protobuf-compiler \
+        build-essential pkg-config libssl-dev protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 # Fortanix EDP toolchain (the base image's default toolchain is nightly).
@@ -32,23 +31,22 @@ RUN rustup target add x86_64-fortanix-unknown-sgx \
 WORKDIR /src
 COPY . .
 
-# Build only the enclave crate for the SGX target.
+# Build the enclave for the SGX target. Plaintext transport → no extra features
+# and no TLS/attestation deps required.
 RUN cargo build --release -p tog-enclave --target x86_64-fortanix-unknown-sgx
 
 # Convert ELF -> .sgxs using the layout from Cargo.toml's fortanix-sgx metadata.
-# (elf2sgxs reads heap/stack/threads from that metadata when present.)
 RUN ftxsgx-elf2sgxs \
         target/x86_64-fortanix-unknown-sgx/release/tog-enclave \
         --heap-size 2147483648 --stack-size 262144 --threads 16 --debug \
         --output /tog-enclave.sgxs
 
-# Dev signing key. For production, sign with your real key (and register the
-# resulting MRSIGNER with Enclave Manager) — DO NOT ship this throwaway key.
+# Dev signing key — DO NOT ship this throwaway key; sign with your own for prod.
 RUN sgxs-sign --key <(openssl genrsa -3 3072) /tog-enclave.sgxs /tog-enclave.sig --xfrm 7/0 || \
     (openssl genrsa -3 -out /signing-key.pem 3072 && \
      sgxs-sign --key /signing-key.pem /tog-enclave.sgxs /tog-enclave.sig)
 
-# ── Stage 2: runtime with Intel SGX PSW/AESM + the Fortanix runner ──────────
+# ── Stage 2: minimal runtime (Fortanix runner + enclave-loading libs) ───────
 FROM ubuntu:22.04 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -60,19 +58,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends \
         libsgx-enclave-common \
         libsgx-urts \
-        libsgx-quote-ex \
-        libsgx-dcap-ql \
-        libsgx-dcap-default-qpl \
-        sgx-aesm-service \
     && rm -rf /var/lib/apt/lists/*
+# No AESM/DCAP packages: stub attestation does no quoting. (When a real attested
+# transport is added, install the AESM/DCAP plugins and mount the AESM socket.)
 
-# The Fortanix runner that loads .sgxs into the enclave and serves its usercalls
+# The Fortanix runner loads .sgxs into the enclave and serves its usercalls
 # (this is what maps the enclave's TcpListener to a real host socket).
 COPY --from=build /usr/local/cargo/bin/ftxsgx-runner /usr/local/bin/ftxsgx-runner
 COPY --from=build /tog-enclave.sgxs /tog-enclave.sgxs
 COPY --from=build /tog-enclave.sig  /tog-enclave.sig
 
 EXPOSE 1546
-# NOTE: AESM must be reachable (mount /var/run/aesmd) for quote generation, and
-# the host must pass /dev/sgx_enclave + /dev/sgx_provision into the container.
+# Run with TOG_STUB_ATTEST=1 and the host must pass /dev/sgx_enclave into the
+# container. On FLC hardware (which EDP requires) no AESM is needed to launch.
+ENV TOG_STUB_ATTEST=1
 ENTRYPOINT ["ftxsgx-runner", "/tog-enclave.sgxs"]

@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+#
+# Untrusted passthrough proxy (tog-host). Plain x86_64 binary — no SGX, no
+# enclave tooling. Builds anywhere.
+#
+#   docker build -f Dockerfile.host -t tog-host .
+
+# ── Stage 1: build ──────────────────────────────────────────────────────────
+# rust:1-bookworm tracks the latest stable 1.x (edition 2024 needs >= 1.85).
+FROM rust:1-bookworm AS build
+
+WORKDIR /src
+COPY . .
+RUN cargo build --release -p tog-host
+
+# ── Stage 2: runtime ────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+# ca-certificates in case the builder is reached over https.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/target/release/tog-host /usr/local/bin/tog-host
+
+EXPOSE 1545
+ENV TOG_HOST_BIND=0.0.0.0:1545
+# BUILDER_HOST / BUILDER_PORT select the upstream builder (defaults op-rbuilder:8545).
+ENTRYPOINT ["tog-host"]

@@ -1,19 +1,15 @@
 //! Client for the enclave's framed protocol.
 //!
-//! [`Client`] is generic over any `Read + Write` connection, so the same
-//! request/response logic drives both the plaintext dev transport and the
-//! RA-TLS transport. Connectors:
-//!
-//!   * [`connect_plain`] — plain TCP (dev enclave).
-//!   * [`connect_ratls`] — (feature `ratls`) mbedtls client that verifies the
-//!     enclave's Enclave-Manager-issued certificate against EM's CA root.
+//! [`Client`] is generic over any `Read + Write` connection. Today the only
+//! connector is [`connect_plain`] (plain TCP, matching the enclave's plaintext
+//! transport); a verifier for a real attested transport is future work.
 
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use tog_proto::{read_frame, write_frame, Request, Response};
+use tog_proto::{read_frame, write_frame, Request, Response, StubAttestation};
 
 /// A connected client. Each method is one request/response round trip; the
 /// connection stays open across calls.
@@ -53,6 +49,14 @@ impl<S: Read + Write> Client<S> {
         }
     }
 
+    /// DEV stub: read the peer's stub attestation frame (the enclave sends one
+    /// first when started with `TOG_STUB_ATTEST=1`). This is NOT verification —
+    /// it just surfaces the (fake) identity so the attested-channel flow can be
+    /// developed without SGX. A real attested transport is future work.
+    pub fn read_stub_attestation(&mut self) -> Result<StubAttestation, ClientError> {
+        Ok(read_frame(&mut self.conn)?)
+    }
+
     fn call(&mut self, req: Request) -> Result<Response, ClientError> {
         write_frame(&mut self.conn, &req)?;
         Ok(read_frame(&mut self.conn)?)
@@ -73,59 +77,6 @@ pub fn connect_plain(addr: &str) -> std::io::Result<Client<TcpStream>> {
         }
     }
     Err(last.expect("at least one attempt"))
-}
-
-#[cfg(feature = "ratls")]
-pub use ratls::connect_ratls;
-
-#[cfg(feature = "ratls")]
-mod ratls {
-    use super::*;
-    use std::sync::Arc;
-
-    use mbedtls::rng::{CtrDrbg, OsEntropy};
-    use mbedtls::ssl::config::{Endpoint, Preset, Transport as MbedTransport};
-    use mbedtls::ssl::{Config, Context};
-    use mbedtls::x509::Certificate;
-
-    /// Connect to the enclave's RA-TLS endpoint and verify its
-    /// Enclave-Manager-issued certificate against the EM CA root in
-    /// `ca_pem_path`. `server_name`, if given, is checked against the cert.
-    ///
-    /// Because EM only issues the cert after verifying the enclave's
-    /// MRENCLAVE/MRSIGNER quote, a successful handshake against EM's CA is proof
-    /// you're talking to that attested enclave build.
-    pub fn connect_ratls(
-        addr: &str,
-        ca_pem_path: &str,
-        server_name: Option<&str>,
-    ) -> Result<Client<Context<TcpStream>>, ClientError> {
-        let ca = std::fs::read(ca_pem_path)?;
-        // mbedtls' PEM parser wants a NUL-terminated buffer.
-        let mut ca_pem = ca;
-        if ca_pem.last() != Some(&0) {
-            ca_pem.push(0);
-        }
-        let ca = Arc::new(Certificate::from_pem_multiple(&ca_pem).map_err(tls_err)?);
-
-        let entropy = Arc::new(OsEntropy::new());
-        let rng = Arc::new(CtrDrbg::new(entropy, None).map_err(tls_err)?);
-
-        let mut config = Config::new(Endpoint::Client, MbedTransport::Stream, Preset::Default);
-        config.set_rng(rng);
-        // Preset::Default sets AuthMode::Required for clients, so the CA list is
-        // enforced — an unverifiable cert aborts the handshake.
-        config.set_ca_list(ca, None);
-
-        let stream = TcpStream::connect(addr)?;
-        let mut ctx = Context::new(Arc::new(config));
-        ctx.establish(stream, server_name).map_err(tls_err)?;
-        Ok(Client::new(ctx))
-    }
-
-    fn tls_err(e: mbedtls::Error) -> ClientError {
-        ClientError::Tls(e.to_string())
-    }
 }
 
 /// Build a signed EIP-1559 transaction as the `0x`-prefixed 2718 bytes a client
@@ -162,8 +113,6 @@ pub enum ClientError {
     Proto(tog_proto::ProtoError),
     /// The enclave returned a handled error (bad hex, decode/recovery failure).
     Server(String),
-    /// TLS/handshake/verification failure (feature `ratls`).
-    Tls(String),
     Unexpected(String),
 }
 
@@ -173,7 +122,6 @@ impl fmt::Display for ClientError {
             ClientError::Io(e) => write!(f, "io: {e}"),
             ClientError::Proto(e) => write!(f, "protocol: {e}"),
             ClientError::Server(e) => write!(f, "enclave error: {e}"),
-            ClientError::Tls(e) => write!(f, "tls: {e}"),
             ClientError::Unexpected(e) => write!(f, "unexpected response: {e}"),
         }
     }

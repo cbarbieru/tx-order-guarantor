@@ -3,18 +3,9 @@ name = "tog-client"
 version = "0.1.0"
 edition = "2024"
 
-# A test/reference client for the enclave. Two transports:
-#   * plaintext (default)  — talk to the dev enclave (`cargo run -p tog-enclave`)
-#   * ratls    (feature)   — mbedtls client that verifies the enclave's
-#                            Enclave-Manager-issued cert against EM's CA
-#
-# `ratls` is optional so the default build needs no C toolchain and is usable
-# anywhere (incl. the dev Mac). Enable it where you actually talk to the real
-# enclave:  cargo run -p tog-client --features ratls -- --ratls --ca em-ca.pem ...
-[features]
-default = []
-ratls = ["dep:mbedtls"]
-
+# A test/reference client for the enclave. Plaintext transport only (matching the
+# enclave today). Add `--attest-stub` to read the dev stub attestation a stub
+# enclave presents. A real attested-transport verifier is future work.
 [dependencies]
 tog-proto = { path = "../tog-proto" }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
@@ -25,9 +16,6 @@ alloy-consensus = { version = "1.0.23", default-features = false, features = ["k
 alloy-eips = { version = "1.0.23", default-features = false }
 alloy-signer = "1.0.23"
 alloy-signer-local = "1.0.23"
-
-# RA-TLS verifier (host-side, plain TLS against EM's CA — not the SGX target).
-mbedtls = { version = "0.12", default-features = false, features = ["std"], optional = true }
 
 [[bin]]
 name = "tog-client"

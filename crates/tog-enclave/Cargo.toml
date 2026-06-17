@@ -7,26 +7,10 @@ edition = "2024"
 tog-core = { path = "../tog-core" }
 tog-proto = { path = "../tog-proto" }
 # `Bytes`/`B256` types at the protocol edge; `hex` for 0x string conversion.
-# Both are pure Rust and compile for the SGX target.
+# Both are pure Rust and compile for the SGX target. The transport is currently
+# plaintext on all targets (see src/transport.rs), so there are no TLS deps.
 alloy-primitives = { version = "1.0.23", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
-
-# ── RA-TLS via Fortanix Enclave Manager ─────────────────────────────────────
-# The SGX path in src/transport.rs is written against these crates but kept
-# behind `cfg(target_env = "sgx")`, so the host build does NOT need them and
-# this crate still compiles as a plaintext dev server. To build the real
-# enclave, UNCOMMENT the block below on your Linux SGX box.
-#
-# Notes:
-#  * `em-app` lives in the fortanix/rust-sgx repo and pulls a specific `mbedtls`
-#    — let it drive the version (don't fight it with a mismatched pin). If
-#    resolution conflicts, point `mbedtls` at the same source em-app expects.
-#  * `mbedtls` features may need tuning for your toolchain; `rdrand` provides
-#    the SGX entropy source used in transport.rs.
-#
-# [target.'cfg(target_env = "sgx")'.dependencies]
-# em-app  = { git = "https://github.com/fortanix/rust-sgx" }
-# mbedtls = { version = "0.12", default-features = false, features = ["std", "rdrand", "tls13"] }
 
 # Enclave layout consumed by `ftxsgx-elf2sgxs` (and the cargo-sgx runner).
 # Tune these to your box: heap must hold the pool; `threads` caps concurrent

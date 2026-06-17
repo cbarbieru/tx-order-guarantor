@@ -1,9 +1,9 @@
 //! Wire protocol spoken across the enclave boundary.
 //!
-//! The enclave terminates an RA-TLS connection and then speaks this framed
-//! request/response protocol on top of the (now confidential, integrity-
-//! protected) byte stream. There are exactly three operations, mirroring the
-//! original JSON-RPC surface:
+//! The enclave terminates a client connection and then speaks this framed
+//! request/response protocol over it (plaintext today; a real attested transport
+//! is future work). There are exactly three operations, mirroring the original
+//! JSON-RPC surface:
 //!
 //!   * [`Request::SendRawTransaction`]      (input  — stream terminates in enclave)
 //!   * [`Request::GetRawTransactions`]      (output — drains the raw buffer)
@@ -43,6 +43,21 @@ pub enum Response {
     BestTransactionHashes(Vec<String>),
     /// A handled error (bad hex, decode/recovery failure, etc.).
     Error(String),
+}
+
+/// DEV-ONLY stub attestation document.
+///
+/// A real attested transport would carry the SGX quote *inside the TLS
+/// certificate*; this is a plaintext stand-in so the attested-channel shape — peer presents an
+/// attestation, client surfaces/checks it, then the session proceeds — can be
+/// exercised with no SGX / EM / DCAP. `stub` is always `true`: a tripwire so a
+/// stub can never be silently mistaken for a real attestation.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StubAttestation {
+    pub stub: bool,
+    pub mr_enclave: String,
+    pub mr_signer: String,
+    pub note: String,
 }
 
 #[derive(Debug, thiserror::Error)]
