@@ -1,23 +1,23 @@
-# Transaction Order Guarantor — single-pod deployment + service.
+# Transaction Order Guarantor — enclave deployment + service.
 #
 # MODE: real SGX, plaintext transport + STUB attestation.
 # The enclave runs in a genuine SGX enclave (device-plugin EPC request below) but
 # does no TLS/attestation yet — it presents a FAKE attestation (TOG_STUB_ATTEST=1).
-# No Enclave Manager, no node agent, no aesmd. A real attested transport is
-# future work; when it lands, add the attestation infra here.
+# A real attested transport is future work; when it lands, clients attest the
+# enclave directly (which is what gives censorship resistance — no untrusted
+# relay sits in the transaction path).
 #
-# One pod, two containers (shared network namespace → both listeners on pod IP):
-#   * tog-host     :1545  untrusted eth_* passthrough proxy → builder
-#   * tog-enclave  :1546  real SGX enclave; plaintext + TOG_STUB_ATTEST=1
+# Just the enclave here: clients send transactions to it directly, and call the
+# builder directly for read-only eth_* (there is intentionally no proxy in the
+# ingestion path).
 #
 # PREREQUISITES:
 #   * SGX2 nodes (e.g. AKS confidential-computing / Azure DCsv3) with the Intel
 #     SGX device plugin (AKS: `confcom` addon) exposing `sgx.intel.com/epc` and
 #     mounting /dev/sgx_enclave into requesting containers — no privileged/hostPath.
 #     (Some plugin versions split this into sgx.intel.com/enclave + .../provision.)
-#   * Images built and pushed to a registry the cluster can pull:
+#   * Image built and pushed to a registry the cluster can pull:
 #       docker build -f Dockerfile.enclave -t <repo>/tog-enclave .
-#       docker build -f Dockerfile.host    -t <repo>/tog-host .
 #     (kind/minikube: load locally and set imagePullPolicy: Never.)
 #   * Clients connect with `--attest-stub` (they read the fake attestation).
 ---
@@ -39,7 +39,6 @@ spec:
     spec:
       # Requesting sgx.intel.com/epc below already steers the pod onto an SGX node.
       containers:
-        # ── the enclave: real SGX, plaintext + stub attestation ─────────────
         - name: tog-enclave
           image: tog-enclave:latest            # built from Dockerfile.enclave
           imagePullPolicy: IfNotPresent
@@ -65,26 +64,6 @@ spec:
               port: 1546
             initialDelaySeconds: 5
             periodSeconds: 10
-
-        # ── untrusted passthrough proxy (no SGX; rides along in this pod) ────
-        - name: tog-host
-          image: tog-host:latest                # built from Dockerfile.host
-          imagePullPolicy: IfNotPresent
-          ports:
-            - name: rpc
-              containerPort: 1545
-          env:
-            - name: TOG_HOST_BIND
-              value: "0.0.0.0:1545"
-            - name: BUILDER_HOST
-              value: "op-rbuilder"
-            - name: BUILDER_PORT
-              value: "8545"
-          readinessProbe:
-            tcpSocket:
-              port: 1545
-            initialDelaySeconds: 3
-            periodSeconds: 10
 ---
 apiVersion: v1
 kind: Service
@@ -100,9 +79,6 @@ spec:
   selector:
     app: tog
   ports:
-    - name: rpc            # eth_* passthrough → builder
-      port: 1545
-      targetPort: 1545
-    - name: tog            # enclave protocol (plaintext + stub attestation)
+    - name: tog            # enclave protocol — transaction submission (attested)
       port: 1546
       targetPort: 1546

@@ -46,30 +46,21 @@ RUN ftxsgx-elf2sgxs \
 RUN openssl genrsa -3 -out /signing-key.pem 3072 \
     && sgxs-sign --key /signing-key.pem /tog-enclave.sgxs /tog-enclave.sig
 
-# ── Stage 2: minimal runtime (Fortanix runner + enclave-loading libs) ───────
-FROM ubuntu:22.04 AS runtime
+# ── Stage 2: slim runtime (just the Fortanix runner) ────────────────────────
+# debian-slim (~30 MB) keeps a shell, so during bring-up you can `docker exec`
+# in to diagnose enclave-load issues. The runner loads the enclave via
+# /dev/sgx_enclave directly (glibc only) — no Intel PSW/libsgx needed for a
+# plaintext, stub-attested run, which is what drops the bulk of the old 135 MB.
+# If the runner reports a missing .so at startup, `ldd` it inside and
+# `apt-get install` that lib (or fall back to ubuntu:22.04 + libsgx-urts).
+FROM debian:bookworm-slim AS runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl gnupg ca-certificates \
-    && curl -fsSL https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key \
-        | gpg --dearmor -o /usr/share/keyrings/intel-sgx.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/intel-sgx.gpg] https://download.01.org/intel-sgx/sgx_repo/ubuntu jammy main" \
-        > /etc/apt/sources.list.d/intel-sgx.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-        libsgx-enclave-common \
-        libsgx-urts \
-    && rm -rf /var/lib/apt/lists/*
-# No AESM/DCAP packages: stub attestation does no quoting. (When a real attested
-# transport is added, install the AESM/DCAP plugins and mount the AESM socket.)
-
-# The Fortanix runner loads .sgxs into the enclave and serves its usercalls
-# (this is what maps the enclave's TcpListener to a real host socket).
 COPY --from=build /usr/local/cargo/bin/ftxsgx-runner /usr/local/bin/ftxsgx-runner
 COPY --from=build /tog-enclave.sgxs /tog-enclave.sgxs
 COPY --from=build /tog-enclave.sig  /tog-enclave.sig
 
 EXPOSE 1546
-# Run with TOG_STUB_ATTEST=1 and the host must pass /dev/sgx_enclave into the
-# container. On FLC hardware (which EDP requires) no AESM is needed to launch.
+# Pass /dev/sgx_enclave into the container at run time. On FLC hardware (which
+# EDP requires) no AESM is needed to launch.
 ENV TOG_STUB_ATTEST=1
 ENTRYPOINT ["ftxsgx-runner", "/tog-enclave.sgxs"]

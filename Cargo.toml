@@ -4,8 +4,11 @@
 #   crates/tog-core     the TCB: pure-Rust mempool + tip ordering (unit-tested)
 #   crates/tog-enclave  the SGX enclave binary (plaintext listener; runs in a
 #                       real enclave, plaintext dev server on a normal host)
-#   crates/tog-host     the untrusted passthrough eth_* proxy
 #   crates/tog-client   test/reference client (+ dev stub attestation)
+#
+# Reads (eth_*) are NOT proxied here — clients call the builder directly for
+# those; only transaction submission goes (attested) to the enclave. That keeps
+# any untrusted relay out of the ingestion path (censorship resistance).
 #
 # See README.md for architecture, build & SGX-host setup.
 [workspace]
@@ -14,6 +17,5 @@ members = [
     "crates/tog-proto",
     "crates/tog-core",
     "crates/tog-enclave",
-    "crates/tog-host",
     "crates/tog-client",
 ]

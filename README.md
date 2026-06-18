@@ -1,7 +1,9 @@
 # Transaction Order Guarantor — SGX / Fortanix EDP
 
 Runs the **transaction ordering** (the mempool) inside an Intel SGX enclave as
-the smallest trusted unit, with all passthrough/communication outside. One input
+the smallest trusted unit. Clients send transactions **directly to the enclave**
+— there is intentionally **no proxy in the ingestion path** (censorship
+resistance) — and query the builder directly for read-only `eth_*`. One input
 (`send_raw_transaction`) terminates inside the enclave; two outputs
 (`get_raw_transactions`, `get_best_transaction_hashes`) are read from it.
 
@@ -34,25 +36,65 @@ inside a real enclave). A real attested transport is future work — see
 
 ## Architecture
 
-```
-                    ┌────────────────────── untrusted host ──────────────────────┐
-   eth_* (RO) ─────►│  tog-host : jsonrpsee proxy ──► builder (op-rbuilder)        │
-                    └─────────────────────────────────────────────────────────────┘
+End-state architecture — **real attestation + RA-TLS terminating inside the
+enclave**. (Today it's plaintext + a stub attestation; see [Attestation](#attestation).)
 
-   submitters ── plaintext ──►┐   (stub-attested for now)
-   builder    ── plaintext ──►│  tog-enclave (SGX)  : runs in a real enclave,
-                              │   ├─ send_raw_transaction   (input)
-                              │   ├─ get_raw_transactions   (output, drains buffer)
-                              └─► └─ get_best_transaction_hashes (output, ordering)
-                                   state: tog-core::Mempool (in enclave memory)
+```mermaid
+flowchart LR
+    SUB["Submitters<br/>(tog-client / SDK)"]
+    RPC["Builder / rollup RPC<br/>(op-rbuilder)"]
+    ATT["Attestation service<br/>(generic: verifier +<br/>collateral / issuer)"]
+
+    subgraph POD["SGX node / k8s pod — UNTRUSTED"]
+      subgraph CONT["tog-enclave container"]
+        RUNNER["ftxsgx-runner · untrusted<br/>brokers I/O — sees only ciphertext"]
+        subgraph TCB["SGX enclave · :1546 — TRUSTED (TCB)"]
+          CORE["tog-core + RA-TLS endpoint<br/>decode · recover signer<br/>gap / RBF / tip ordering"]
+        end
+      end
+    end
+
+    SUB ==>|"RA-TLS · send_raw_transaction<br/>(terminates in enclave)"| CORE
+    RPC ==>|"RA-TLS · get_raw / get_best"| CORE
+    CORE -.->|"network / time usercalls"| RUNNER
+    SUB -->|"verify enclave quote"| ATT
+    RPC -->|"verify enclave quote"| ATT
+    CORE -->|"attestation evidence / identity"| ATT
+    SUB -.->|"eth_* reads — chainId · nonce · gas"| RPC
+
+    classDef tcb fill:#14532d,stroke:#052e16,color:#fff;
+    classDef untrusted fill:#475569,stroke:#1e293b,color:#fff;
+    classDef ext fill:#1e3a5f,stroke:#0c1d33,color:#fff;
+    class CORE tcb;
+    class RUNNER untrusted;
+    class SUB,RPC,ATT ext;
 ```
 
-* **Direct to the enclave** (the chosen trust model): clients talk to the enclave
-  rather than relaying ingestion through the untrusted host — keeping the host
-  out of the integrity path. Today that channel is **plaintext with a stub
-  attestation**, so the confidentiality/tamper-evidence guarantee is *not* in
-  place yet; a real attested transport (see [Attestation](#attestation)) restores
-  it without changing this topology.
+Edge legend: **⇒ thick** = RA-TLS secure channel (tx in / ordering out, terminates
+in the enclave) · **→ solid** = attestation (generic — managed issuer, or
+DCAP + collateral, or any verifier) · **⇢ dotted** = plaintext `eth_*` reads
+straight to the builder / rollup RPC, plus the enclave's network/time usercalls.
+
+**Boundaries & limits**
+
+* **TCB = `tog-core` (+ the RA-TLS endpoint) inside the enclave only** (green):
+  decode + signer recovery + ordering. Nothing else is trusted.
+* **Untrusted** (grey): the node/OS and `ftxsgx-runner`. Because RA-TLS
+  *terminates inside the enclave*, the runner brokers the socket but sees **only
+  ciphertext** — it can't read, selectively drop, reorder or inject txs. (In
+  today's plaintext+stub phase it still sees the bytes; closing that gap is
+  exactly what the attested transport does.)
+* **Direct to the enclave, no proxy** — the censorship-resistance property: tx
+  submission goes straight to the attested enclave, and clients hit the **builder
+  / rollup RPC directly** for read-only `eth_*` (chainId, nonce, gas), which never
+  touches the ordering.
+* **Attestation is generic**: the enclave publishes evidence (a quote bound to its
+  TLS key); submitters and the builder verify the enclave's identity via an
+  attestation service before trusting the channel. The concrete mechanism
+  (managed issuer vs DCAP + collateral) is intentionally left open.
+* **Hard limits**: enclave heap is bounded by node **EPC** (`heap-size`, default
+  2 GiB → needs SGX2); the pool is **ephemeral** (lost on restart) and in-enclave
+  **time is untrusted**.
 
 ### Crates
 
@@ -61,8 +103,10 @@ inside a real enclave). A real attested transport is future work — see
 | `tog-proto`   | any (pure)                     | length-prefixed JSON wire protocol (3 ops + stub attestation) |
 | `tog-core`    | any (pure)                     | **TCB**: decode + signer recovery + tip ordering, unit-tested |
 | `tog-enclave` | `x86_64-fortanix-unknown-sgx`  | client listener (no Tokio), dispatches to `tog-core` |
-| `tog-host`    | normal                         | untrusted `eth_*` passthrough proxy |
 | `tog-client`  | normal                         | test/reference client (+ dev stub attestation) |
+
+Read-only `eth_*` is **not** proxied — clients call the builder directly, so no
+untrusted component sits in the ingestion path.
 
 ### No-Tokio model
 
@@ -103,7 +147,6 @@ state-provider abstraction.
 ```bash
 cargo test  -p tog-proto -p tog-core   # the logic that matters, verifiable locally
 cargo run   -p tog-enclave             # PLAINTEXT dev server on :1546
-cargo run   -p tog-host                # passthrough proxy on :1545
 ```
 
 ### Test client (`tog-client`)
@@ -167,7 +210,6 @@ needed to launch.
 
 ```bash
 docker build -f Dockerfile.enclave -t tog-enclave .
-docker build -f Dockerfile.host    -t tog-host .
 
 docker run --rm --device /dev/sgx_enclave \
   -e TOG_ENCLAVE_BIND=0.0.0.0:1546 -e TOG_STUB_ATTEST=1 -p 1546:1546 \
@@ -176,8 +218,8 @@ docker run --rm --device /dev/sgx_enclave \
 
 Docker isolates the binary, not the silicon — SGX is hardware and can't be
 virtualized away; the machine that runs the enclave needs the SGX device.
-Kubernetes: [`k8s/tog.yaml`](k8s/tog.yaml) deploys both containers in one pod
-with the SGX device-plugin EPC request and `TOG_STUB_ATTEST=1`.
+Kubernetes: [`k8s/tog.yaml`](k8s/tog.yaml) deploys the enclave with the SGX
+device-plugin EPC request and `TOG_STUB_ATTEST=1`.
 
 ## Build-host setup (Linux SGX box)
 
