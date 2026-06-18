@@ -42,9 +42,9 @@ RUN ftxsgx-elf2sgxs \
         --output /tog-enclave.sgxs
 
 # Dev signing key — DO NOT ship this throwaway key; sign with your own for prod.
-RUN sgxs-sign --key <(openssl genrsa -3 3072) /tog-enclave.sgxs /tog-enclave.sig --xfrm 7/0 || \
-    (openssl genrsa -3 -out /signing-key.pem 3072 && \
-     sgxs-sign --key /signing-key.pem /tog-enclave.sgxs /tog-enclave.sig)
+# SGX requires a 3072-bit RSA key with public exponent 3.
+RUN openssl genrsa -3 -out /signing-key.pem 3072 \
+    && sgxs-sign --key /signing-key.pem /tog-enclave.sgxs /tog-enclave.sig
 
 # ── Stage 2: minimal runtime (Fortanix runner + enclave-loading libs) ───────
 FROM ubuntu:22.04 AS runtime
