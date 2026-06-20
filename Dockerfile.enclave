@@ -50,11 +50,16 @@ RUN openssl genrsa -3 -out /signing-key.pem 3072 \
 # ── Stage 2: slim runtime (just the Fortanix runner) ────────────────────────
 # debian-slim (~30 MB) keeps a shell, so during bring-up you can `docker exec`
 # in to diagnose enclave-load issues. The runner loads the enclave via
-# /dev/sgx_enclave directly (glibc only) — no Intel PSW/libsgx needed for a
-# plaintext, stub-attested run, which is what drops the bulk of the old 135 MB.
-# If the runner reports a missing .so at startup, `ldd` it inside and
-# `apt-get install` that lib (or fall back to ubuntu:22.04 + libsgx-urts).
+# /dev/sgx_enclave directly — no Intel PSW/libsgx needed for a plaintext,
+# stub-attested run, which is what drops the bulk of the old 135 MB.
+# ftxsgx-runner is dynamically linked against bookworm's OpenSSL 3, so it needs
+# libssl.so.3 at runtime (same bookworm base → ABI-compatible). If the runner
+# still reports another missing .so, `ldd /usr/local/bin/ftxsgx-runner` inside
+# and apt-get that lib.
 FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends libssl3 \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /usr/local/cargo/bin/ftxsgx-runner /usr/local/bin/ftxsgx-runner
 COPY --from=build /tog-enclave.sgxs /tog-enclave.sgxs
