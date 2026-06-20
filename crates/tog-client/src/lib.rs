@@ -49,10 +49,10 @@ impl<S: Read + Write> Client<S> {
         }
     }
 
-    /// DEV stub: read the peer's stub attestation frame (the enclave sends one
-    /// first when started with `TOG_STUB_ATTEST=1`). This is NOT verification —
-    /// it just surfaces the (fake) identity so the attested-channel flow can be
-    /// developed without SGX. A real attested transport is future work.
+    /// DEV stub: read the peer's stub attestation frame (the enclave always sends
+    /// one first). This is NOT verification — it just surfaces the (fake) identity
+    /// so the attested-channel flow can be developed without SGX. A real attested
+    /// transport is future work.
     pub fn read_stub_attestation(&mut self) -> Result<StubAttestation, ClientError> {
         Ok(read_frame(&mut self.conn)?)
     }

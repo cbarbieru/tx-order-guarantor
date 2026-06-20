@@ -27,11 +27,6 @@ fn main() {
     // Base fee used for tip ordering; feed the builder's pending base fee here.
     let base_fee: u64 = env::var("TOG_BASE_FEE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
 
-    // Present a FAKE attestation to clients so the attested-channel flow is
-    // exercisable now (the transport is plaintext; real attestation is future
-    // work). Clients opt in with `--attest-stub`.
-    let stub_attest = env::var("TOG_STUB_ATTEST").is_ok();
-
     let pool: SharedPool = Arc::new(Mutex::new(Mempool::new(base_fee, 7)));
 
     // Build the transport once. Plaintext today (no-op); the seam is here so a
@@ -45,9 +40,7 @@ fn main() {
     if cfg!(not(target_env = "sgx")) {
         eprintln!("⚠️  tog-enclave running OUTSIDE SGX (plaintext, NOT attested) — dev only");
     }
-    if stub_attest {
-        eprintln!("⚠️  TOG_STUB_ATTEST set — presenting a FAKE attestation to clients (dev only)");
-    }
+    eprintln!("⚠️  presenting a STUB attestation to every client (fake, NOT real) — dev only");
     println!("🔒 tog-enclave listening on {bind} (base_fee={base_fee})");
 
     for incoming in listener.incoming() {
@@ -58,7 +51,7 @@ fn main() {
                 // One thread per connection. On SGX this consumes a TCS, so the
                 // `threads` metadata bounds concurrency.
                 thread::spawn(move || {
-                    if let Err(e) = serve(&transport, stream, pool, stub_attest) {
+                    if let Err(e) = serve(&transport, stream, pool) {
                         eprintln!("connection ended: {e}");
                     }
                 });
@@ -72,23 +65,22 @@ fn serve(
     transport: &transport::Transport,
     stream: TcpStream,
     pool: SharedPool,
-    stub_attest: bool,
 ) -> std::io::Result<()> {
     let mut session = transport.accept(stream)?;
 
-    // DEV stub: announce a fake attestation before the request loop. Clients
-    // opt in with `--attest-stub`. Obvious placeholder measurements + a `stub`
-    // tripwire so it can't be confused with a real quote.
-    if stub_attest {
-        let att = StubAttestation {
-            stub: true,
-            mr_enclave: format!("0x{}", "de".repeat(32)),
-            mr_signer: format!("0x{}", "be".repeat(32)),
-            note: "DEV STUB — NOT A REAL SGX QUOTE; proves nothing".to_string(),
-        };
-        if write_frame(&mut session, &att).is_err() {
-            return Ok(());
-        }
+    // Always announce a fake attestation before the request loop — stub is the
+    // only mode, and the client always reads it (no env gate: EDP enclaves don't
+    // inherit the host environment, so this must be baked in, not toggled at
+    // runtime). Obvious placeholder measurements + a `stub` tripwire so it can
+    // never be confused with a real quote.
+    let att = StubAttestation {
+        stub: true,
+        mr_enclave: format!("0x{}", "de".repeat(32)),
+        mr_signer: format!("0x{}", "be".repeat(32)),
+        note: "DEV STUB — NOT A REAL SGX QUOTE; proves nothing".to_string(),
+    };
+    if write_frame(&mut session, &att).is_err() {
+        return Ok(());
     }
 
     loop {

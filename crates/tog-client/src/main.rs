@@ -1,6 +1,6 @@
 //! CLI for the enclave protocol.
 //!
-//!   tog-client [--addr H:P] [--attest-stub] <command>       # plaintext
+//!   tog-client [--addr H:P] <command>       # plaintext
 //!
 //! Commands:
 //!   send <0xRAWTX>   submit a raw transaction, print its hash
@@ -8,8 +8,8 @@
 //!   get-best         print the enclave-computed ordering
 //!   demo             send sample txs (distinct tips), then show the ordering
 //!
-//! `--attest-stub` reads a FAKE attestation from a dev enclave started with
-//! `TOG_STUB_ATTEST=1` (proves nothing — for developing the flow without SGX).
+//! The enclave always opens with a dev STUB attestation (fake — proves nothing);
+//! the client reads and surfaces it before running the command.
 
 use std::error::Error;
 use std::io::{Read, Write};
@@ -18,20 +18,17 @@ use tog_client::{Client, connect_plain, sample_raw_tx};
 
 struct Args {
     addr: String,
-    attest_stub: bool,
     rest: Vec<String>,
 }
 
 fn parse_args() -> Args {
     let mut addr = "127.0.0.1:1546".to_string();
-    let mut attest_stub = false;
     let mut rest = Vec::new();
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--addr" => addr = it.next().unwrap_or(addr),
-            "--attest-stub" => attest_stub = true,
             "-h" | "--help" => {
                 print_usage();
                 std::process::exit(0);
@@ -39,12 +36,12 @@ fn parse_args() -> Args {
             _ => rest.push(arg),
         }
     }
-    Args { addr, attest_stub, rest }
+    Args { addr, rest }
 }
 
 fn print_usage() {
     eprintln!(
-        "usage: tog-client [--addr H:P] [--attest-stub] <command>\n\
+        "usage: tog-client [--addr H:P] <command>\n\
          commands: send <0xRAWTX> | get-raw | get-best | demo"
     );
 }
@@ -55,23 +52,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut client = connect_plain(&args.addr)?;
     eprintln!("connected (plaintext) to {}", args.addr);
 
-    if args.attest_stub {
-        match client.read_stub_attestation() {
-            Ok(att) if att.stub => {
-                eprintln!("🔒 attestation: STUB (dev) — peer claims SGX identity:");
-                eprintln!("     mr_enclave = {}", att.mr_enclave);
-                eprintln!("     mr_signer  = {}", att.mr_signer);
-                eprintln!("     ⚠ {}", att.note);
-            }
-            Ok(_) => return Err("peer sent a non-stub attestation".into()),
-            Err(e) => {
-                return Err(format!(
-                    "--attest-stub expects a stub attestation first; \
-                     start the enclave with TOG_STUB_ATTEST=1 ({e})"
-                )
-                .into());
-            }
+    // The enclave always opens with a stub attestation frame — read + surface it.
+    match client.read_stub_attestation() {
+        Ok(att) if att.stub => {
+            eprintln!("🔒 attestation: STUB (dev) — peer claims SGX identity:");
+            eprintln!("     mr_enclave = {}", att.mr_enclave);
+            eprintln!("     mr_signer  = {}", att.mr_signer);
+            eprintln!("     ⚠ {}", att.note);
         }
+        Ok(_) => return Err("peer sent a non-stub attestation".into()),
+        Err(e) => return Err(format!("expected a stub attestation frame first ({e})").into()),
     }
 
     run(&mut client, &args.rest)

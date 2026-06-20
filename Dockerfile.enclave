@@ -2,18 +2,19 @@
 #
 # SGX image for the tog-enclave (Fortanix EDP).
 #
-# Transport is PLAINTEXT and attestation is the dev STUB (TOG_STUB_ATTEST) — so
-# no Enclave Manager, no mbedtls, and no AESM are needed. The enclave still runs
-# in a REAL enclave (the runtime needs the kernel SGX driver passed in).
+# Transport is PLAINTEXT and the enclave always presents a dev STUB attestation —
+# so no Enclave Manager, no mbedtls, and no AESM are needed. It still runs in a
+# REAL enclave (the runtime needs the kernel SGX driver passed in). Note: EDP
+# enclaves do NOT inherit the container environment, so behaviour is baked into
+# the build, not set via `-e` (TOG_* env vars don't reach the enclave).
 #
 # This is a STARTING POINT — iterate on your Linux SGX box. It cannot be built or
 # run on an Apple-Silicon Mac (no SGX, ARM CPU). Build/run on an SGX2 host
 # (e.g. Azure DCsv3/DCdsv3).
 #
 #   docker build -f Dockerfile.enclave -t tog-enclave .
-#   docker run --rm --device /dev/sgx_enclave \
-#       -e TOG_ENCLAVE_BIND=0.0.0.0:1546 -e TOG_STUB_ATTEST=1 \
-#       -p 1546:1546 tog-enclave
+#   docker run --rm --device /dev/sgx_enclave -p 1546:1546 tog-enclave
+#   # then, from the same host:  cargo run -p tog-client -- --addr 127.0.0.1:1546 demo
 
 # ── Stage 1: build the enclave + convert/sign it ────────────────────────────
 # Fortanix EDP requires Rust nightly.
@@ -60,7 +61,7 @@ COPY --from=build /tog-enclave.sgxs /tog-enclave.sgxs
 COPY --from=build /tog-enclave.sig  /tog-enclave.sig
 
 EXPOSE 1546
-# Pass /dev/sgx_enclave into the container at run time. On FLC hardware (which
-# EDP requires) no AESM is needed to launch.
-ENV TOG_STUB_ATTEST=1
+# Pass /dev/sgx_enclave into the container at run time, and publish :1546 to reach
+# it from the host. On FLC hardware (which EDP requires) no AESM is needed to
+# launch. The stub attestation is always-on (baked into the binary), not an env.
 ENTRYPOINT ["ftxsgx-runner", "/tog-enclave.sgxs"]

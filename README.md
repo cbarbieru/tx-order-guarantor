@@ -164,21 +164,23 @@ The plaintext `demo` path is verified working end-to-end on an arm64 Mac.
 
 #### Dev stub attestation
 
-The enclave can present a FAKE attestation so the *attested-channel shape* — peer
-presents an attestation, the client surfaces/gates on it, then the session
-proceeds — can be exercised before a real transport exists. Opt in on **both**
-ends (runtime, no rebuild):
+The enclave **always** opens each connection with a FAKE attestation frame, and
+the client always reads + surfaces it — so the *attested-channel shape* (peer
+presents an attestation, client checks identity, then proceeds) is exercised end
+to end before a real transport exists. No flags, no env:
 
 ```bash
-TOG_STUB_ATTEST=1 cargo run -p tog-enclave            # enclave sends a FAKE attestation
-cargo run -p tog-client -- --attest-stub demo         # client surfaces it, then runs
+cargo run -p tog-enclave                  # always presents a stub attestation
+cargo run -p tog-client -- demo           # reads it, then runs
 #   🔒 attestation: STUB (dev) — mr_enclave=0xdede… mr_signer=0xbebe…  ⚠ proves NOTHING
 ```
 
 It's deliberately unmistakable: a `stub: true` tripwire + placeholder
-measurements + a "NOT A REAL SGX QUOTE" note. Both ends must opt in (the
-attestation is an app-level frame, so a one-sided mismatch desyncs the stream).
-This works the same on the host dev server and inside a real enclave.
+measurements + a "NOT A REAL SGX QUOTE" note. It is **not** gated on an env var —
+EDP enclaves don't inherit the host/container environment, so behaviour that must
+work on real SGX is baked into the build, not injected at runtime (which would
+also be an untrusted-host input anyway). Same on the host dev server and inside a
+real enclave.
 
 ### Enclave (Linux SGX host, nightly)
 
@@ -189,7 +191,7 @@ cargo install fortanix-sgx-tools sgxs-tools
 cargo +nightly build --release -p tog-enclave --target x86_64-fortanix-unknown-sgx
 
 # with the runner configured (see setup §5), this converts + signs + runs:
-TOG_STUB_ATTEST=1 cargo +nightly run -p tog-enclave --target x86_64-fortanix-unknown-sgx
+cargo +nightly run -p tog-enclave --target x86_64-fortanix-unknown-sgx
 # …or do it by hand:
 ftxsgx-elf2sgxs target/x86_64-fortanix-unknown-sgx/release/tog-enclave \
     --heap-size 2147483648 --stack-size 262144 --threads 16 --debug \
@@ -211,15 +213,16 @@ needed to launch.
 ```bash
 docker build -f Dockerfile.enclave -t tog-enclave .
 
-docker run --rm --device /dev/sgx_enclave \
-  -e TOG_ENCLAVE_BIND=0.0.0.0:1546 -e TOG_STUB_ATTEST=1 -p 1546:1546 \
-  tog-enclave
+docker run --rm --device /dev/sgx_enclave -p 1546:1546 tog-enclave
+# then, from the same host:  cargo run -p tog-client -- --addr 127.0.0.1:1546 demo
 ```
 
-Docker isolates the binary, not the silicon — SGX is hardware and can't be
-virtualized away; the machine that runs the enclave needs the SGX device.
-Kubernetes: [`k8s/tog.yaml`](k8s/tog.yaml) deploys the enclave with the SGX
-device-plugin EPC request and `TOG_STUB_ATTEST=1`.
+(EDP enclaves don't inherit the container env, so there are no `-e` knobs — the
+stub attestation and the `:1546` bind are baked into the build.) Docker isolates
+the binary, not the silicon — SGX is hardware and can't be virtualized away; the
+machine that runs the enclave needs the SGX device. Kubernetes:
+[`k8s/tog.yaml`](k8s/tog.yaml) deploys the enclave with the SGX device-plugin EPC
+request.
 
 ## Build-host setup (Linux SGX box)
 
@@ -283,9 +286,9 @@ can actually run an enclave).
 ## Attestation
 
 The enclave currently has **no real attestation**: the transport is plaintext,
-and `TOG_STUB_ATTEST=1` makes it present a fake attestation document that
-`tog-client --attest-stub` reads (see [Dev stub attestation](#dev-stub-attestation)).
-This is enough to develop and integrate the end-to-end flow on real SGX.
+and it always presents a fake attestation document that `tog-client` reads (see
+[Dev stub attestation](#dev-stub-attestation)). This is enough to develop and
+integrate the end-to-end flow on real SGX.
 
 A real attested transport (terminating TLS inside the enclave, with the SGX quote
 bound to the TLS key and verified by clients) is **future work**. The transport

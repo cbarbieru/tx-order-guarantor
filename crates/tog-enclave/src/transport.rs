@@ -2,8 +2,8 @@
 //!
 //! Currently **plaintext on every target** — including inside a real SGX
 //! enclave. There is no TLS or real attestation yet; the only attestation is the
-//! application-level dev stub (`TOG_STUB_ATTEST`, see `main.rs`), which presents
-//! a fake document so the attested-channel flow can be exercised. A real attested
+//! application-level dev stub (always-on, see `main.rs`) which presents a fake
+//! document so the attested-channel flow can be exercised. A real attested
 //! transport is future work.
 //!
 //! [`Transport::init`] runs once at startup; [`Transport::accept`] wraps each

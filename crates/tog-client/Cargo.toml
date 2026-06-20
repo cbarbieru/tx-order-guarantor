@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 # A test/reference client for the enclave. Plaintext transport only (matching the
-# enclave today). Add `--attest-stub` to read the dev stub attestation a stub
-# enclave presents. A real attested-transport verifier is future work.
+# enclave today). The enclave always opens with a dev stub attestation, which the
+# client reads and surfaces. A real attested-transport verifier is future work.
 [dependencies]
 tog-proto = { path = "../tog-proto" }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }

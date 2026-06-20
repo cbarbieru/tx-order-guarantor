@@ -2,7 +2,8 @@
 #
 # MODE: real SGX, plaintext transport + STUB attestation.
 # The enclave runs in a genuine SGX enclave (device-plugin EPC request below) but
-# does no TLS/attestation yet — it presents a FAKE attestation (TOG_STUB_ATTEST=1).
+# does no TLS/attestation yet — it always presents a FAKE attestation (baked into
+# the build; EDP enclaves don't read the container env, so there's nothing to set).
 # A real attested transport is future work; when it lands, clients attest the
 # enclave directly (which is what gives censorship resistance — no untrusted
 # relay sits in the transaction path).
@@ -19,7 +20,8 @@
 #   * Image built and pushed to a registry the cluster can pull:
 #       docker build -f Dockerfile.enclave -t <repo>/tog-enclave .
 #     (kind/minikube: load locally and set imagePullPolicy: Never.)
-#   * Clients connect with `--attest-stub` (they read the fake attestation).
+#   * Clients just connect (e.g. `tog-client --addr <svc>:1546 demo`); the enclave
+#     always opens with the fake attestation, which the client reads.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -45,14 +47,9 @@ spec:
           ports:
             - name: tog
               containerPort: 1546
-          env:
-            - name: TOG_ENCLAVE_BIND
-              value: "0.0.0.0:1546"
-            - name: TOG_BASE_FEE
-              value: "0"
-            # Present a FAKE attestation to clients (dev). Real attestation TBD.
-            - name: TOG_STUB_ATTEST
-              value: "1"
+          # No env: EDP enclaves don't inherit the container environment, so TOG_*
+          # vars wouldn't reach the enclave — it uses its built-in defaults
+          # (bind 0.0.0.0:1546, base_fee 0) and always presents the stub attestation.
           resources:
             limits:
               # Real SGX: must be <= the node's EPC and >= the enclave heap-size in
